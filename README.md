@@ -62,3 +62,12 @@ If you do not install this helper:
 - The extension works completely normally.
 - It will simply use the **Manual free space fallback (GB)** value entered in Settings (e.g. `50` or `450` GB) to protect against out-of-disk-space downloads.
 - When the helper is active, you get live telemetry and system health diagnostics in the extension header.
+
+---
+
+## 🌐 Public Provider & Deployment
+
+Since the main extension repository is private, the helper installer is hosted on a public repository for unauthenticated curl installation:
+- **Public Repo**: [https://github.com/naveen-ramalingam/dl2curl-pi-helper](https://github.com/naveen-ramalingam/dl2curl-pi-helper)
+- **Deployment & Sync Guide**: See [DEPLOYMENT.md](./DEPLOYMENT.md) for details on GitHub Actions automatic sync and credential configuration.
+
