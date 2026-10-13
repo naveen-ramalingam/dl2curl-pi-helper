@@ -415,6 +415,7 @@ if [ "$ACTION" = "tasks" ]; then
 fi
 
 if [ "$ACTION" = "status" ]; then
+  HELPER_PORT="$EXISTING_HELPER_PORT"
   DOWNLOADS_DIR="$EXISTING_DIR"
   ARIA2_RPC_PORT="$EXISTING_PORT"
   ARIA2_SECRET="$EXISTING_TOKEN"
@@ -980,7 +981,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/diskspace.py ${HELPER_PORT} ${DOWNLOADS_DIR}
+ExecStart=/usr/bin/python3 ${INSTALL_DIR}/diskspace.py ${HELPER_PORT} "${DOWNLOADS_DIR}"
 Restart=always
 RestartSec=5
 StandardOutput=journal

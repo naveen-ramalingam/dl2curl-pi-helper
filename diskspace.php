@@ -58,22 +58,25 @@ $percentUsed = ($totalBytes > 0) ? round(($usedBytes / $totalBytes) * 100, 1) : 
 $isMounted = false;
 $mountFilesystems = @file_get_contents('/proc/mounts');
 if ($mountFilesystems) {
-    $normalizedCheck = rtrim($checkPath, '/');
+    $normalizedCheck = rtrim(realpath($checkPath) ?: $checkPath, '/');
     if ($normalizedCheck === '') $normalizedCheck = '/';
-    // Match mount points in /proc/mounts
-    if (preg_match('#\s+' . preg_quote($normalizedCheck, '#') . '\s+#', $mountFilesystems)) {
-        $isMounted = true;
-    } elseif ($normalizedCheck !== '/' && strpos($mountFilesystems, dirname($normalizedCheck)) !== false) {
-        $isMounted = true;
+    foreach (explode("\n", $mountFilesystems) as $line) {
+        $parts = preg_split('/\s+/', trim($line));
+        if (count($parts) < 2) continue;
+        $mount = str_replace(['\\040', '\\011', '\\134'], [' ', "\t", '\\'], $parts[1]);
+        if ($mount !== '/' && ($normalizedCheck === $mount || strpos($normalizedCheck, rtrim($mount, '/') . '/') === 0)) {
+            $isMounted = true;
+            break;
+        }
     }
 }
 
 // Test write permission (catches read-only mounts)
 $isWritable = false;
 if (is_dir($checkPath) && is_writable($checkPath)) {
-    $testFile = rtrim($checkPath, '/') . '/.dl2curl_test_' . uniqid();
-    if (@file_put_contents($testFile, 'ok') !== false) {
-        $isWritable = true;
+    $testFile = @tempnam($checkPath, '.dl2curl_test_');
+    if ($testFile !== false) {
+        $isWritable = realpath(dirname($testFile)) === realpath($checkPath) && @file_put_contents($testFile, 'ok') !== false;
         @unlink($testFile);
     }
 }

@@ -28,6 +28,7 @@ import json
 import shutil
 import time
 import socket
+import tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -123,9 +124,12 @@ def is_aria2_running():
                 if entry.isdigit():
                     cmd_path = os.path.join('/proc', entry, 'cmdline')
                     if os.path.exists(cmd_path):
-                        with open(cmd_path, 'rb') as f:
-                            if b'aria2c' in f.read():
-                                return True
+                        try:
+                            with open(cmd_path, 'rb') as f:
+                                if b'aria2c' in f.read():
+                                    return True
+                        except (OSError, PermissionError):
+                            continue
         except Exception:
             pass
     return False
@@ -138,17 +142,12 @@ def check_mount_and_writable(path):
         try:
             with open('/proc/mounts', 'r', encoding='utf-8') as f:
                 mounts = f.read()
-                norm = os.path.normpath(path)
+                norm = os.path.realpath(path)
                 for line in mounts.splitlines():
                     parts = line.split()
-                    if len(parts) >= 2 and os.path.normpath(parts[1]) == norm:
-                        is_mounted = True
-                        break
-                if not is_mounted and norm != '/':
-                    parent = os.path.dirname(norm)
-                    for line in mounts.splitlines():
-                        parts = line.split()
-                        if len(parts) >= 2 and os.path.normpath(parts[1]) == parent:
+                    if len(parts) >= 2:
+                        mount = os.path.normpath(parts[1].replace('\\040', ' ').replace('\\011', '\t').replace('\\134', '\\'))
+                        if mount != '/' and (norm == mount or norm.startswith(mount.rstrip('/') + '/')):
                             is_mounted = True
                             break
         except Exception:
@@ -156,11 +155,10 @@ def check_mount_and_writable(path):
 
     is_writable = False
     if os.path.isdir(path) and os.access(path, os.W_OK):
-        test_file = os.path.join(path, f".dl2curl_test_{int(time.time())}")
         try:
-            with open(test_file, 'w', encoding='utf-8') as f:
+            with tempfile.TemporaryFile(mode='w', encoding='utf-8', dir=path, prefix='.dl2curl_test_') as f:
                 f.write('ok')
-            os.remove(test_file)
+                f.flush()
             is_writable = True
         except Exception:
             is_writable = False
@@ -171,7 +169,7 @@ def check_mount_and_writable(path):
 class DiskSpaceHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Keep terminal log clean
-        sys.stderr.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {args[0]} - {args[1]}\n")
+        sys.stderr.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {format % args}\n")
 
     def send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
