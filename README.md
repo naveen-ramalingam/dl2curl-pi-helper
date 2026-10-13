@@ -25,15 +25,30 @@ Run this single command on your Raspberry Pi terminal (or via SSH):
 curl -sSL https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/install.sh | sudo bash
 ```
 
-### What this does:
-1. Installs the standalone microservice to `/opt/dl2curl-pi/diskspace.py`.
-2. Creates and enables the systemd service `/etc/systemd/system/dl2curl-diskspace.service` to **automatically start on every system boot**.
-3. If Apache is installed on your Pi (`/var/www/html`), it also copies `diskspace.php` so you can query it via Port 80.
-4. Starts the service immediately on port `6801`.
+### What this does (Interactive Wizard):
+1. **Interactive Storage Drive Selection**:
+   - Scans all mounted storage drives and partitions (USB hard drives, external SSDs, SD card).
+   - Displays real-time total and free storage space.
+   - Lets you choose your preferred storage location (or enter a custom directory) and verifies write permissions.
+2. **Aria2 Detection & Installation**:
+   - Detects whether `aria2` (`aria2c`) is installed.
+   - If missing, offers 1-click automatic installation via package manager (`apt-get`, `pacman`, `dnf`, `apk`).
+   - Configures `/etc/aria2/aria2.conf` with optimized multi-connection settings (16 splits, 16 connections, session persistence).
+   - Sets up authentication with an auto-generated secure token or your own custom secret.
+   - Creates and enables `/etc/systemd/system/aria2.service` to auto-start on system boot.
+3. **dl2curl Health & Disk Space Microservice**:
+   - Installs the standalone microservice to `/opt/dl2curl-pi/diskspace.py`.
+   - Creates and enables `/etc/systemd/system/dl2curl-diskspace.service` to automatically run on port `6801` on every system boot.
+   - If Apache is installed on your Pi (`/var/www/html`), also copies `diskspace.php`.
+4. **Configuration Summary**:
+   - Prints your Raspberry Pi IP, Aria2 RPC URL, RPC Secret, and Health Helper URL ready to copy into your Chrome extension settings.
 
 After running the script, in the Chrome extension settings:
+- Set **Aria2 RPC URL** to: `http://<your-pi-ip>:6800/jsonrpc`
+- Set **Aria2 RPC Secret** to: `<your-secret-token>`
+- Set **Download directory** to: `<your-selected-storage-path>`
 - Set **Pi disk space script URL** to: `http://<your-pi-ip>:6801/diskspace` (or `http://<your-pi-ip>/diskspace.php`)
-- Click **Save settings** and **Check Space**.
+- Click **Save settings** and **Test connection**.
 
 ---
 
