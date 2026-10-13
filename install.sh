@@ -327,7 +327,40 @@ configure_aria2_rpc() {
   fi
   ARIA2_SECRET="$rpc_secret"
 
-  # 3. Write /etc/aria2/aria2.conf
+  # 3. BitTorrent listen port
+  local bt_port=6881
+  if [ "$INTERACTIVE" = true ]; then
+    echo ""
+    echo -e "${C_BOLD}${C_BLUE}─── BitTorrent Speed Optimisation ───${C_RESET}"
+    echo "For fast torrent speeds, Aria2 needs an open inbound port so peers"
+    echo "can connect back to your Pi (avoids 0 B/s stall with many peers)."
+    echo ""
+    read -rp "Enter BitTorrent listen port [default: 6881]: " bt_in || bt_in=""
+    bt_port="${bt_in:-6881}"
+  fi
+
+  # Install miniupnpc — enables upnp-open.sh / upnp-close.sh called by aria2.service.
+  # The port is opened automatically each time Aria2 starts and released when it stops.
+  echo ""
+  echo "📦 Installing miniupnpc (automatic UPnP router port mapping)..."
+  UPNP_AVAILABLE=false
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y miniupnpc >/dev/null 2>&1
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm miniupnpc >/dev/null 2>&1
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y miniupnpc >/dev/null 2>&1
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache miniupnpc >/dev/null 2>&1
+  fi
+  command -v upnpc >/dev/null 2>&1 && UPNP_AVAILABLE=true || UPNP_AVAILABLE=false
+  if [ "$UPNP_AVAILABLE" = true ]; then
+    echo -e "   ${C_GREEN}✓ miniupnpc ready — Aria2 will auto-open port ${bt_port} on your router via UPnP.${C_RESET}"
+  else
+    echo -e "   ${C_YELLOW}⚠️ miniupnpc unavailable — forward port ${bt_port} TCP+UDP manually on your router.${C_RESET}"
+  fi
+
+  # 4. Write /etc/aria2/aria2.conf
   mkdir -p /etc/aria2
   local conf_file="/etc/aria2/aria2.conf"
   if [ -f "$conf_file" ]; then
@@ -339,31 +372,59 @@ configure_aria2_rpc() {
 ## ==============================================================================
 ## Aria2 Configuration for dl2curl (Generated: $(date))
 ## ==============================================================================
-# Basic Settings
+
+# ── Basic Settings ─────────────────────────────────────────────────────────────
 dir=${DOWNLOADS_DIR}
 file-allocation=none
 continue=true
+max-concurrent-downloads=5
+auto-file-renaming=true
+content-disposition-default-utf8=true
+
+# ── HTTP / Multi-connection ────────────────────────────────────────────────────
 max-connection-per-server=16
 split=16
 min-split-size=10M
-max-concurrent-downloads=5
 
-# RPC Settings
+# ── RPC Settings ──────────────────────────────────────────────────────────────
 enable-rpc=true
 rpc-listen-all=true
 rpc-listen-port=${ARIA2_RPC_PORT}
 rpc-allow-origin-all=true
 $([ -n "$ARIA2_SECRET" ] && echo "rpc-secret=${ARIA2_SECRET}")
 
-# Session State Persistence
+# ── Session State Persistence ─────────────────────────────────────────────────
 input-file=/etc/aria2/aria2.session
 save-session=/etc/aria2/aria2.session
 save-session-interval=60
 
-# Performance
-disk-cache=32M
-auto-file-renaming=true
+# ── Performance ───────────────────────────────────────────────────────────────
+disk-cache=64M
 summary-interval=0
+
+# ── BitTorrent Speed Optimisation ─────────────────────────────────────────────
+# Without an open listen port, peers cannot connect back to your Pi → 0 B/s stall.
+# Forward TCP+UDP port ${bt_port} → this Pi's LAN IP on your router.
+listen-port=${bt_port}
+dht-listen-port=${bt_port}
+
+# Peer discovery
+enable-dht=true
+enable-dht6=false
+enable-peer-exchange=true
+bt-enable-lpd=true
+
+# Peer limits & speed floor
+bt-max-peers=100
+bt-request-peer-speed-limit=50K
+bt-max-open-files=100
+
+# Seeding — stop quickly to free bandwidth for the next download
+seed-ratio=0.1
+bt-stop-timeout=600
+
+# Extra public trackers (helps find peers when the magnet tracker list is thin)
+bt-tracker=udp://tracker.dler.com:6969/announce,udp://open.demonii.com:1337/announce,udp://tracker.torrent.eu.org:451/announce,udp://tracker-udp.gbitt.info:80/announce,http://tracker.bt4g.com:2095/announce
 EOF
   chmod 600 "$conf_file"
 
@@ -371,18 +432,51 @@ EOF
   touch /etc/aria2/aria2.session
   chmod 644 /etc/aria2/aria2.session
 
-  # 4. Create /etc/systemd/system/aria2.service
+  # 4. Write UPnP open/close helper scripts
+  #    These are called by aria2.service ExecStartPost / ExecStopPost
+  #    so the router port is open exactly while Aria2 is running.
+  mkdir -p "$INSTALL_DIR"
+
+  cat <<'UPNP_OPEN' > "$INSTALL_DIR/upnp-open.sh"
+#!/usr/bin/env bash
+# Called by aria2.service ExecStartPost — open BT port on router via UPnP.
+PORT="$(grep -Po '(?<=^listen-port=)\d+' /etc/aria2/aria2.conf 2>/dev/null || echo 6881)"
+if ! command -v upnpc >/dev/null 2>&1; then exit 0; fi
+upnpc -r "$PORT" TCP >/dev/null 2>&1
+upnpc -r "$PORT" UDP >/dev/null 2>&1
+EXT="$(upnpc -s 2>/dev/null | awk -F= '/ExternalIPAddress/{gsub(/ /,"",$2); print $2}')"
+echo "$(date '+%Y-%m-%d %H:%M:%S') [upnp-open] port $PORT mapped (external: ${EXT:-unknown})"
+UPNP_OPEN
+
+  cat <<'UPNP_CLOSE' > "$INSTALL_DIR/upnp-close.sh"
+#!/usr/bin/env bash
+# Called by aria2.service ExecStopPost — release port mapping when Aria2 stops.
+PORT="$(grep -Po '(?<=^listen-port=)\d+' /etc/aria2/aria2.conf 2>/dev/null || echo 6881)"
+if ! command -v upnpc >/dev/null 2>&1; then exit 0; fi
+upnpc -d "$PORT" TCP >/dev/null 2>&1
+upnpc -d "$PORT" UDP >/dev/null 2>&1
+echo "$(date '+%Y-%m-%d %H:%M:%S') [upnp-close] port $PORT released"
+UPNP_CLOSE
+
+  chmod +x "$INSTALL_DIR/upnp-open.sh" "$INSTALL_DIR/upnp-close.sh"
+
+  # 5. Create /etc/systemd/system/aria2.service
+  #    ExecStartPost runs upnp-open.sh after Aria2 is up (non-blocking).
+  #    ExecStopPost  runs upnp-close.sh after Aria2 exits.
   local aria_bin
   aria_bin=$(command -v aria2c || echo "/usr/bin/aria2c")
   cat <<EOF > "/etc/systemd/system/aria2.service"
 [Unit]
 Description=Aria2 Download Manager Daemon
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 ExecStart=${aria_bin} --conf-path=${conf_file}
+ExecStartPost=-/bin/bash ${INSTALL_DIR}/upnp-open.sh
+ExecStopPost=-/bin/bash ${INSTALL_DIR}/upnp-close.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -395,12 +489,20 @@ EOF
   systemctl daemon-reload
   systemctl enable aria2.service 2>/dev/null || true
   systemctl restart aria2.service 2>/dev/null || true
-  sleep 1
+  sleep 2
 
   if systemctl is-active --quiet aria2.service 2>/dev/null; then
-    echo -e "   ${C_GREEN}✓ Aria2 systemd service is active and running on port ${ARIA2_RPC_PORT}!${C_RESET}"
+    echo -e "   ${C_GREEN}✓ Aria2 service active on port ${ARIA2_RPC_PORT}${C_RESET}"
+    echo -e "   ${C_GREEN}✓ UPnP hooks installed — port ${bt_port} opens/closes with Aria2${C_RESET}"
   else
-    echo -e "   ${C_YELLOW}⚠️ Note: aria2.service created. Check: journalctl -u aria2 -n 20${C_RESET}"
+    echo -e "   ${C_YELLOW}⚠️ aria2.service created. Check: journalctl -u aria2 -n 20${C_RESET}"
+  fi
+
+  # Export so show_summary can check UPnP availability
+  BT_PORT="$bt_port"
+  UPNP_AVAILABLE=false
+  if command -v upnpc >/dev/null 2>&1; then
+    UPNP_AVAILABLE=true
   fi
 }
 
@@ -485,6 +587,8 @@ show_summary() {
     ip_addr=$(ip route get 1 2>/dev/null | awk '{print $7}' 2>/dev/null || echo "127.0.0.1")
   fi
 
+  local bt_port_display="${BT_PORT:-6881}"
+
   echo ""
   echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
   echo -e "${C_BOLD}${C_GREEN} 🎉 dl2curl & Aria2 Installation & Setup Complete!${C_RESET}"
@@ -498,6 +602,13 @@ show_summary() {
     else
       echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
     fi
+  fi
+  if [ "${UPNP_AVAILABLE:-false}" = true ]; then
+    echo -e " 🌐 UPnP Port Mapping:      ${C_GREEN}Auto-active — port ${bt_port_display} opens when Aria2 starts ✓${C_RESET}"
+    echo -e "                            ${C_GREEN}(no router login needed — just like qBittorrent)${C_RESET}"
+  else
+    echo -e " 🌐 UPnP Port Mapping:      ${C_YELLOW}miniupnpc unavailable${C_RESET}"
+    echo -e "                            ${C_YELLOW}→ Forward TCP+UDP ${bt_port_display} to ${ip_addr} on your router${C_RESET}"
   fi
   echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${ip_addr}:${HELPER_PORT}/diskspace${C_RESET}"
   if [ -f "/var/www/html/diskspace.php" ]; then
@@ -524,4 +635,5 @@ select_storage
 install_aria2_package
 setup_health_helper
 show_summary
+
 
