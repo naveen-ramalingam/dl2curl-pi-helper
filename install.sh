@@ -60,8 +60,18 @@ CLI_PORT=""
 CLI_DIR=""
 
 # Parse command line options
+ACTION="setup"
 for arg in "$@"; do
   case "$arg" in
+    token|--token)
+      ACTION="token"
+      ;;
+    status|--status|info|--info)
+      ACTION="status"
+      ;;
+    tasks|--tasks|live|--live)
+      ACTION="tasks"
+      ;;
     -y|--yes|--non-interactive|--auto)
       INTERACTIVE=false
       ;;
@@ -76,10 +86,196 @@ for arg in "$@"; do
   esac
 done
 
-DOWNLOADS_DIR="${CLI_DIR:-$DEFAULT_DOWNLOADS_DIR}"
+# Read existing configuration if present
+EXISTING_CONF="/etc/aria2/aria2.conf"
+EXISTING_TOKEN=""
+EXISTING_PORT="$DEFAULT_RPC_PORT"
+EXISTING_DIR="$DEFAULT_DOWNLOADS_DIR"
+
+if [ -f "$EXISTING_CONF" ]; then
+  EXISTING_TOKEN=$(grep -Po '(?<=^rpc-secret=).*' "$EXISTING_CONF" 2>/dev/null || true)
+  EXISTING_PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_RPC_PORT")
+  EXISTING_DIR=$(grep -Po '(?<=^dir=).*' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_DOWNLOADS_DIR")
+fi
+
+# ─── Final Summary Screen ─────────────────────────────────────────────────────
+
+show_summary() {
+  local ip_addr
+  ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+  if [ -z "$ip_addr" ]; then
+    ip_addr=$(ip route get 1 2>/dev/null | awk '{print $7}' 2>/dev/null || echo "127.0.0.1")
+  fi
+
+  local bt_port_display="${BT_PORT:-6881}"
+
+  echo ""
+  echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
+  echo -e "${C_BOLD}${C_GREEN} 🎉 dl2curl & Aria2 Installation & Status${C_RESET}"
+  echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
+  echo -e " 🖥️  Host IP Address:        ${C_BOLD}${ip_addr}${C_RESET}"
+  echo -e " 📁 Download Folder:        ${C_BOLD}${DOWNLOADS_DIR}${C_RESET}"
+  if [ -n "${ARIA2_RPC_PORT:-}" ]; then
+    echo -e " 📥 Aria2 RPC Status:       ${C_GREEN}Active on port ${ARIA2_RPC_PORT}${C_RESET}"
+    if [ -n "${ARIA2_SECRET:-}" ]; then
+      echo -e " 🔑 Aria2 Secret Token:     ${C_CYAN}${ARIA2_SECRET}${C_RESET}"
+    else
+      echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
+    fi
+  fi
+  if [ "${UPNP_AVAILABLE:-false}" = true ]; then
+    echo -e " 🌐 UPnP Port Mapping:      ${C_GREEN}Auto-active — port ${bt_port_display} opens when Aria2 starts ✓${C_RESET}"
+    echo -e "                            ${C_GREEN}(no router login needed — just like qBittorrent)${C_RESET}"
+  else
+    echo -e " 🌐 UPnP Port Mapping:      ${C_YELLOW}miniupnpc unavailable${C_RESET}"
+    echo -e "                            ${C_YELLOW}→ Forward TCP+UDP ${bt_port_display} to ${ip_addr} on your router${C_RESET}"
+  fi
+  echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${ip_addr}:${HELPER_PORT}/diskspace${C_RESET}"
+  if [ -f "/var/www/html/diskspace.php" ]; then
+    echo -e " 🌐 Apache Helper URL:      http://${ip_addr}/diskspace.php"
+  fi
+  echo ""
+  echo -e "${C_BOLD}${C_YELLOW}👉 ENTER THESE IN YOUR CHROME EXTENSION SETTINGS (⚙):${C_RESET}"
+  echo "──────────────────────────────────────────────────────────────"
+  if [ -n "${ARIA2_RPC_PORT:-}" ]; then
+    echo -e "  • Aria2 RPC URL:           ${C_BOLD}http://${ip_addr}:${ARIA2_RPC_PORT}/jsonrpc${C_RESET}"
+    echo -e "  • Aria2 RPC Secret:        ${C_BOLD}${ARIA2_SECRET:-[Leave empty]}${C_RESET}"
+  fi
+  echo -e "  • Download directory:      ${C_BOLD}${DOWNLOADS_DIR}${C_RESET}"
+  echo -e "  • Pi disk space script:    ${C_BOLD}http://${ip_addr}:${HELPER_PORT}/diskspace${C_RESET}"
+  echo "──────────────────────────────────────────────────────────────"
+  echo -e "💡 ${C_CYAN}SSH Quick View:${C_RESET} Run ${C_BOLD}dl2curl${C_RESET} anytime in terminal to see this card"
+  echo -e "                   Run ${C_BOLD}dl2curl token${C_RESET} to print only the secret token"
+  echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
+  echo ""
+}
+
+# ─── Install Global CLI Shortcut ──────────────────────────────────────────────
+
+install_cli_shortcut() {
+  cat << 'CLI_SCRIPT' > /usr/local/bin/dl2curl
+#!/usr/bin/env bash
+set -u
+
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_GREEN="\033[32m"
+C_YELLOW="\033[33m"
+C_CYAN="\033[36m"
+C_RED="\033[31m"
+
+IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -z "$IP" ] && IP="127.0.0.1"
+
+CONF="/etc/aria2/aria2.conf"
+TOKEN=""
+PORT="6800"
+DIR="/mnt/hdd/Downloads"
+
+if [ -f "$CONF" ]; then
+  TOKEN=$(grep -Po '(?<=^rpc-secret=).*' "$CONF" 2>/dev/null || true)
+  PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$CONF" 2>/dev/null || echo "6800")
+  DIR=$(grep -Po '(?<=^dir=).*' "$CONF" 2>/dev/null || echo "/mnt/hdd/Downloads")
+fi
+
+# Quick token flag
+if [ "${1:-}" = "token" ] || [ "${1:-}" = "--token" ]; then
+  if [ -n "$TOKEN" ]; then
+    echo "$TOKEN"
+  else
+    echo "None (unauthenticated)"
+  fi
+  exit 0
+fi
+
+# Quick live tasks flag
+if [ "${1:-}" = "tasks" ] || [ "${1:-}" = "live" ]; then
+  if [ -n "$TOKEN" ]; then
+    curl -s -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellActive\",\"params\":[\"token:${TOKEN}\"]}" http://127.0.0.1:${PORT}/jsonrpc | python3 -m json.tool
+  else
+    curl -s -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellActive\",\"params\":[]}" http://127.0.0.1:${PORT}/jsonrpc | python3 -m json.tool
+  fi
+  exit 0
+fi
+
+echo ""
+echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
+echo -e "${C_BOLD} 🚀 dl2curl & Aria2 — Quick Status & RPC Token${C_RESET}"
+echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
+echo -e " 🖥️  Host IP Address:        ${C_BOLD}${IP}${C_RESET}"
+echo -e " 📁 Download Folder:        ${C_BOLD}${DIR}${C_RESET}"
+echo -e " 📥 Aria2 RPC URL:          ${C_BOLD}http://${IP}:${PORT}/jsonrpc${C_RESET}"
+if [ -n "$TOKEN" ]; then
+  echo -e " 🔑 Aria2 Secret Token:     ${C_BOLD}${C_GREEN}${TOKEN}${C_RESET}"
+else
+  echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
+fi
+echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${IP}:6801/diskspace${C_RESET}"
+echo ""
+
+# UPnP check
+if command -v upnpc >/dev/null 2>&1; then
+  UPNP_MAP=$(upnpc -l 2>/dev/null | grep "6881" | head -n 1 || true)
+  if [ -n "$UPNP_MAP" ]; then
+    echo -e " 🌐 UPnP Router Port:       ${C_GREEN}Port 6881 mapped on router ✓${C_RESET}"
+  else
+    echo -e " 🌐 UPnP Router Port:       ${C_YELLOW}Port 6881 not mapped yet${C_RESET}"
+  fi
+fi
+
+# Aria2 process check
+if systemctl is-active --quiet aria2 2>/dev/null; then
+  echo -e " ⚡ Aria2 Daemon:           ${C_GREEN}Active & Running ✓${C_RESET}"
+else
+  echo -e " ⚡ Aria2 Daemon:           ${C_RED}Stopped ✗${C_RESET}"
+fi
+
+echo "──────────────────────────────────────────────────────────────"
+echo -e "${C_BOLD}${C_YELLOW}👉 CHROME EXTENSION SETTINGS (⚙):${C_RESET}"
+echo -e "  • RPC URL:     http://${IP}:${PORT}/jsonrpc"
+echo -e "  • RPC Secret:  ${TOKEN:-[Leave empty]}"
+echo -e "  • Directory:   ${DIR}"
+echo -e "  • Script URL:  http://${IP}:6801/diskspace"
+echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
+echo "Quick shortcuts:"
+echo "  dl2curl token   → Print only the secret token"
+echo "  dl2curl tasks   → View active downloads"
+echo ""
+CLI_SCRIPT
+  chmod +x /usr/local/bin/dl2curl 2>/dev/null || true
+}
+
+# Quick CLI commands
+if [ "$ACTION" = "token" ]; then
+  if [ -n "$EXISTING_TOKEN" ]; then
+    echo "$EXISTING_TOKEN"
+  else
+    echo "None (unauthenticated)"
+  fi
+  exit 0
+fi
+
+if [ "$ACTION" = "tasks" ]; then
+  if [ -n "$EXISTING_TOKEN" ]; then
+    curl -s -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellActive\",\"params\":[\"token:${EXISTING_TOKEN}\"]}" http://127.0.0.1:${EXISTING_PORT}/jsonrpc | python3 -m json.tool
+  else
+    curl -s -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellActive\",\"params\":[]}" http://127.0.0.1:${EXISTING_PORT}/jsonrpc | python3 -m json.tool
+  fi
+  exit 0
+fi
+
+if [ "$ACTION" = "status" ]; then
+  DOWNLOADS_DIR="$EXISTING_DIR"
+  ARIA2_RPC_PORT="$EXISTING_PORT"
+  ARIA2_SECRET="$EXISTING_TOKEN"
+  show_summary
+  exit 0
+fi
+
+DOWNLOADS_DIR="${CLI_DIR:-$EXISTING_DIR}"
 HELPER_PORT="${CLI_PORT:-$DEFAULT_HELPER_PORT}"
-ARIA2_RPC_PORT="$DEFAULT_RPC_PORT"
-ARIA2_SECRET=""
+ARIA2_RPC_PORT="$EXISTING_PORT"
+ARIA2_SECRET="$EXISTING_TOKEN"
 
 echo ""
 echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
@@ -88,6 +284,42 @@ echo -e "${C_BOLD}${C_CYAN}=====================================================
 echo "This installer sets up Aria2 download manager and the dl2curl health"
 echo "microservice with automatic boot on systemd."
 echo ""
+
+# Interactive menu if already installed
+if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ]; then
+  echo -e "${C_GREEN}✓ Existing dl2curl & Aria2 installation detected!${C_RESET}"
+  echo "What would you like to do?"
+  echo -e "  [${C_BOLD}1${C_RESET}] View Status & RPC Token (Quick View)"
+  echo -e "  [${C_BOLD}2${C_RESET}] Reconfigure / Run Full Setup"
+  echo -e "  [${C_BOLD}3${C_RESET}] View Live Active Downloads"
+  echo -e "  [${C_BOLD}4${C_RESET}] Exit"
+  echo ""
+  read -rp "Select option [1-4, default: 1]: " menu_choice || menu_choice=""
+  case "${menu_choice:-1}" in
+    1)
+      DOWNLOADS_DIR="$EXISTING_DIR"
+      ARIA2_RPC_PORT="$EXISTING_PORT"
+      ARIA2_SECRET="$EXISTING_TOKEN"
+      show_summary
+      exit 0
+      ;;
+    3)
+      if [ -n "$EXISTING_TOKEN" ]; then
+        curl -s -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellActive\",\"params\":[\"token:${EXISTING_TOKEN}\"]}" http://127.0.0.1:${EXISTING_PORT}/jsonrpc | python3 -m json.tool
+      else
+        curl -s -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellActive\",\"params\":[]}" http://127.0.0.1:${EXISTING_PORT}/jsonrpc | python3 -m json.tool
+      fi
+      exit 0
+      ;;
+    4)
+      echo "Exiting."
+      exit 0
+      ;;
+    *)
+      echo "Proceeding with setup..."
+      ;;
+  esac
+fi
 
 # ─── Drive Discovery Helper ───────────────────────────────────────────────────
 
@@ -578,62 +810,13 @@ EOF
   fi
 }
 
-# ─── Step 5: Final Summary Screen ─────────────────────────────────────────────
-
-show_summary() {
-  local ip_addr
-  ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
-  if [ -z "$ip_addr" ]; then
-    ip_addr=$(ip route get 1 2>/dev/null | awk '{print $7}' 2>/dev/null || echo "127.0.0.1")
-  fi
-
-  local bt_port_display="${BT_PORT:-6881}"
-
-  echo ""
-  echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
-  echo -e "${C_BOLD}${C_GREEN} 🎉 dl2curl & Aria2 Installation & Setup Complete!${C_RESET}"
-  echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
-  echo -e " 🖥️  Host IP Address:        ${C_BOLD}${ip_addr}${C_RESET}"
-  echo -e " 📁 Download Folder:        ${C_BOLD}${DOWNLOADS_DIR}${C_RESET}"
-  if [ -n "${ARIA2_RPC_PORT:-}" ]; then
-    echo -e " 📥 Aria2 RPC Status:       ${C_GREEN}Active on port ${ARIA2_RPC_PORT}${C_RESET}"
-    if [ -n "${ARIA2_SECRET:-}" ]; then
-      echo -e " 🔑 Aria2 Secret Token:     ${C_CYAN}${ARIA2_SECRET}${C_RESET}"
-    else
-      echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
-    fi
-  fi
-  if [ "${UPNP_AVAILABLE:-false}" = true ]; then
-    echo -e " 🌐 UPnP Port Mapping:      ${C_GREEN}Auto-active — port ${bt_port_display} opens when Aria2 starts ✓${C_RESET}"
-    echo -e "                            ${C_GREEN}(no router login needed — just like qBittorrent)${C_RESET}"
-  else
-    echo -e " 🌐 UPnP Port Mapping:      ${C_YELLOW}miniupnpc unavailable${C_RESET}"
-    echo -e "                            ${C_YELLOW}→ Forward TCP+UDP ${bt_port_display} to ${ip_addr} on your router${C_RESET}"
-  fi
-  echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${ip_addr}:${HELPER_PORT}/diskspace${C_RESET}"
-  if [ -f "/var/www/html/diskspace.php" ]; then
-    echo -e " 🌐 Apache Helper URL:      http://${ip_addr}/diskspace.php"
-  fi
-  echo ""
-  echo -e "${C_BOLD}${C_YELLOW}👉 ENTER THESE IN YOUR CHROME EXTENSION SETTINGS (⚙):${C_RESET}"
-  echo "──────────────────────────────────────────────────────────────"
-  if [ -n "${ARIA2_RPC_PORT:-}" ]; then
-    echo -e "  • Aria2 RPC URL:           ${C_BOLD}http://${ip_addr}:${ARIA2_RPC_PORT}/jsonrpc${C_RESET}"
-    echo -e "  • Aria2 RPC Secret:        ${C_BOLD}${ARIA2_SECRET:-[Leave empty]}${C_RESET}"
-  fi
-  echo -e "  • Download directory:      ${C_BOLD}${DOWNLOADS_DIR}${C_RESET}"
-  echo -e "  • Pi disk space script:    ${C_BOLD}http://${ip_addr}:${HELPER_PORT}/diskspace${C_RESET}"
-  echo "──────────────────────────────────────────────────────────────"
-  echo -e "${C_BOLD}Click 'Save settings' and 'Test Connection' in the extension!${C_RESET}"
-  echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
-  echo ""
-}
-
 # ─── Execution ────────────────────────────────────────────────────────────────
 
 select_storage
 install_aria2_package
 setup_health_helper
+install_cli_shortcut
 show_summary
+
 
 
