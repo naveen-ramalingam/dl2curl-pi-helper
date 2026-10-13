@@ -61,6 +61,7 @@ CLI_DIR=""
 
 # Parse command line options
 ACTION="setup"
+FORCE_RECONFIGURE=false
 for arg in "$@"; do
   case "$arg" in
     token|--token)
@@ -71,6 +72,9 @@ for arg in "$@"; do
       ;;
     tasks|--tasks|live|--live)
       ACTION="tasks"
+      ;;
+    -f|--force)
+      FORCE_RECONFIGURE=true
       ;;
     -y|--yes|--non-interactive|--auto)
       INTERACTIVE=false
@@ -91,12 +95,23 @@ EXISTING_CONF="/etc/aria2/aria2.conf"
 EXISTING_TOKEN=""
 EXISTING_PORT="$DEFAULT_RPC_PORT"
 EXISTING_DIR="$DEFAULT_DOWNLOADS_DIR"
+EXISTING_HELPER_PORT="$DEFAULT_HELPER_PORT"
 
 if [ -f "$EXISTING_CONF" ]; then
   EXISTING_TOKEN=$(grep -Po '(?<=^rpc-secret=).*' "$EXISTING_CONF" 2>/dev/null || true)
   EXISTING_PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_RPC_PORT")
   EXISTING_DIR=$(grep -Po '(?<=^dir=).*' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_DOWNLOADS_DIR")
 fi
+
+if [ -f "/etc/systemd/system/dl2curl-diskspace.service" ]; then
+  EXISTING_HELPER_PORT=$(grep -Po '(?<=diskspace\.py )\d+' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null || echo "$DEFAULT_HELPER_PORT")
+fi
+
+UPNP_AVAILABLE=false
+if command -v upnpc >/dev/null 2>&1; then
+  UPNP_AVAILABLE=true
+fi
+
 
 # ─── Final Summary Screen ─────────────────────────────────────────────────────
 
@@ -276,6 +291,31 @@ DOWNLOADS_DIR="${CLI_DIR:-$EXISTING_DIR}"
 HELPER_PORT="${CLI_PORT:-$DEFAULT_HELPER_PORT}"
 ARIA2_RPC_PORT="$EXISTING_PORT"
 ARIA2_SECRET="$EXISTING_TOKEN"
+
+# Check if already installed and no configuration changes are requested
+TARGET_DIR="${CLI_DIR:-$EXISTING_DIR}"
+TARGET_HELPER_PORT="${CLI_PORT:-$EXISTING_HELPER_PORT}"
+
+if [ "$FORCE_RECONFIGURE" = false ] && [ -f "$EXISTING_CONF" ]; then
+  # If non-interactive OR if CLI arguments were passed that match existing configuration
+  if [ "$INTERACTIVE" = false ] || [ -n "$CLI_DIR" ] || [ -n "$CLI_PORT" ]; then
+    if [ "$TARGET_DIR" = "$EXISTING_DIR" ] && [ "$TARGET_HELPER_PORT" = "$EXISTING_HELPER_PORT" ] && systemctl is-active --quiet aria2 2>/dev/null; then
+      echo ""
+      echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
+      echo -e "${C_BOLD}${C_GREEN} ℹ️  dl2curl & Aria2 are already installed and running.${C_RESET}"
+      echo -e " ✓  No configuration changes detected — skipping setup to keep existing settings & RPC secret."
+      echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
+      echo "    (To force re-run setup and change settings, use: install.sh --force)"
+      install_cli_shortcut
+      DOWNLOADS_DIR="$EXISTING_DIR"
+      ARIA2_RPC_PORT="$EXISTING_PORT"
+      ARIA2_SECRET="$EXISTING_TOKEN"
+      HELPER_PORT="$EXISTING_HELPER_PORT"
+      show_summary
+      exit 0
+    fi
+  fi
+fi
 
 echo ""
 echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
@@ -539,23 +579,41 @@ configure_aria2_rpc() {
   local generated_token
   generated_token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || openssl rand -hex 16 2>/dev/null || echo "aria2_$(date +%s)")
   
-  local rpc_secret="$generated_token"
+  local rpc_secret="${EXISTING_TOKEN:-$generated_token}"
   if [ "$INTERACTIVE" = true ]; then
     echo ""
     echo "Aria2 RPC Secret Token (Authentication):"
-    echo -e "  [${C_BOLD}1${C_RESET}] Generate strong random token (${C_GREEN}${generated_token}${C_RESET}) [Recommended]"
-    echo -e "  [${C_BOLD}2${C_RESET}] Enter your own custom secret token"
-    echo -e "  [${C_BOLD}3${C_RESET}] No secret (unauthenticated LAN access)"
-    read -rp "Choose authentication [1-3, default: 1]: " s_opt || s_opt=""
-    case "${s_opt:-1}" in
-      1) rpc_secret="$generated_token" ;;
-      2)
-        read -rp "Enter custom secret token: " custom_tok || custom_tok=""
-        rpc_secret="$custom_tok"
-        ;;
-      3) rpc_secret="" ;;
-      *) rpc_secret="$generated_token" ;;
-    esac
+    if [ -n "$EXISTING_TOKEN" ]; then
+      echo -e "  [${C_BOLD}1${C_RESET}] Keep current token (${C_GREEN}${EXISTING_TOKEN}${C_RESET}) [Recommended]"
+      echo -e "  [${C_BOLD}2${C_RESET}] Generate new random token (${C_YELLOW}${generated_token}${C_RESET})"
+      echo -e "  [${C_BOLD}3${C_RESET}] Enter your own custom secret token"
+      echo -e "  [${C_BOLD}4${C_RESET}] No secret (unauthenticated LAN access)"
+      read -rp "Choose authentication [1-4, default: 1]: " s_opt || s_opt=""
+      case "${s_opt:-1}" in
+        1) rpc_secret="$EXISTING_TOKEN" ;;
+        2) rpc_secret="$generated_token" ;;
+        3)
+          read -rp "Enter custom secret token: " custom_tok || custom_tok=""
+          rpc_secret="$custom_tok"
+          ;;
+        4) rpc_secret="" ;;
+        *) rpc_secret="$EXISTING_TOKEN" ;;
+      esac
+    else
+      echo -e "  [${C_BOLD}1${C_RESET}] Generate strong random token (${C_GREEN}${generated_token}${C_RESET}) [Recommended]"
+      echo -e "  [${C_BOLD}2${C_RESET}] Enter your own custom secret token"
+      echo -e "  [${C_BOLD}3${C_RESET}] No secret (unauthenticated LAN access)"
+      read -rp "Choose authentication [1-3, default: 1]: " s_opt || s_opt=""
+      case "${s_opt:-1}" in
+        1) rpc_secret="$generated_token" ;;
+        2)
+          read -rp "Enter custom secret token: " custom_tok || custom_tok=""
+          rpc_secret="$custom_tok"
+          ;;
+        3) rpc_secret="" ;;
+        *) rpc_secret="$generated_token" ;;
+      esac
+    fi
   fi
   ARIA2_SECRET="$rpc_secret"
 
