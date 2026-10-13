@@ -52,11 +52,47 @@ After running the script, in the Chrome extension settings:
 
 ---
 
+## 🔍 Quick Status & RPC Token in SSH Terminal
+
+Whenever connected to your Pi via SSH, run the shortcut:
+
+```bash
+dl2curl
+```
+
+This displays a clean status card with your:
+* Host IP address
+* Aria2 RPC URL & **RPC Secret Token**
+* Download directory
+* Health Helper URL & port
+* Live UPnP router port mapping status
+* Live Aria2 daemon running state
+
+### Quick Flags:
+```bash
+dl2curl token    # Print only the raw secret token (easy to copy)
+dl2curl tasks    # View active torrents and download speeds
+```
+
+### Interactive Installer Menu:
+When re-running the 1-line installer:
+```bash
+curl -sSL https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/install.sh | sudo bash
+```
+It detects your existing installation and offers an interactive menu:
+* `[1] View Status & RPC Token (Quick View)`
+* `[2] Reconfigure / Run Full Setup`
+* `[3] View Live Active Downloads`
+* `[4] Exit`
+
+---
+
 ## ⚙️ Service Control
 
 ```bash
 # Check service status
 sudo systemctl status dl2curl-diskspace
+
 
 # Restart service
 sudo systemctl restart dl2curl-diskspace
