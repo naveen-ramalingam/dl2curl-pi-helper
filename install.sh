@@ -52,12 +52,16 @@ fi
 # Defaults
 DEFAULT_HELPER_PORT=6801
 DEFAULT_RPC_PORT=6800
+DEFAULT_RPC_SECRET="dl2curl-aria2"
 DEFAULT_DOWNLOADS_DIR="/mnt/hdd/Downloads"
 INSTALL_DIR="/opt/dl2curl-pi"
 SERVICE_NAME="dl2curl-diskspace"
+UPNP_SERVICE="/etc/systemd/system/aria2.service"
+UPNP_DROPIN="/etc/systemd/system/aria2.service.d/dl2curl-upnp.conf"
 
 CLI_PORT=""
 CLI_DIR=""
+CLI_UPNP=""
 
 # Parse command line options
 ACTION="setup"
@@ -78,6 +82,12 @@ for arg in "$@"; do
       ;;
     -y|--yes|--non-interactive|--auto)
       INTERACTIVE=false
+      ;;
+    --enable-upnp)
+      CLI_UPNP=true
+      ;;
+    --disable-upnp)
+      CLI_UPNP=false
       ;;
     [0-9]*)
       [ -z "$CLI_PORT" ] && CLI_PORT="$arg"
@@ -107,11 +117,6 @@ if [ -f "/etc/systemd/system/dl2curl-diskspace.service" ]; then
   EXISTING_HELPER_PORT=$(grep -Po '(?<=diskspace\.py )\d+' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null || echo "$DEFAULT_HELPER_PORT")
 fi
 
-UPNP_AVAILABLE=false
-if command -v upnpc >/dev/null 2>&1; then
-  UPNP_AVAILABLE=true
-fi
-
 
 # ─── Final Summary Screen ─────────────────────────────────────────────────────
 
@@ -122,7 +127,7 @@ show_summary() {
     ip_addr=$(ip route get 1 2>/dev/null | awk '{print $7}' 2>/dev/null || echo "127.0.0.1")
   fi
 
-  local bt_port_display="${BT_PORT:-6881}"
+  local bt_port_display="${BT_PORT:-$(upnp_port)}"
 
   echo ""
   echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
@@ -131,20 +136,27 @@ show_summary() {
   echo -e " 🖥️  Host IP Address:        ${C_BOLD}${ip_addr}${C_RESET}"
   echo -e " 📁 Download Folder:        ${C_BOLD}${DOWNLOADS_DIR}${C_RESET}"
   if [ -n "${ARIA2_RPC_PORT:-}" ]; then
-    echo -e " 📥 Aria2 RPC Status:       ${C_GREEN}Active on port ${ARIA2_RPC_PORT}${C_RESET}"
+    if systemctl is-active --quiet aria2.service 2>/dev/null; then
+      echo -e " 📥 Aria2 RPC Status:       ${C_GREEN}Active on port ${ARIA2_RPC_PORT}${C_RESET}"
+    else
+      echo -e " 📥 Aria2 RPC Status:       ${C_YELLOW}Not running (configured port ${ARIA2_RPC_PORT})${C_RESET}"
+    fi
     if [ -n "${ARIA2_SECRET:-}" ]; then
       echo -e " 🔑 Aria2 Secret Token:     ${C_CYAN}${ARIA2_SECRET}${C_RESET}"
     else
       echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
     fi
   fi
-  if [ "${UPNP_AVAILABLE:-false}" = true ]; then
-    echo -e " 🌐 UPnP Port Mapping:      ${C_GREEN}Auto-active — port ${bt_port_display} opens when Aria2 starts ✓${C_RESET}"
-    echo -e "                            ${C_GREEN}(no router login needed — just like qBittorrent)${C_RESET}"
+  if upnp_enabled; then
+    if command -v upnpc >/dev/null 2>&1; then
+      echo -e " 🌐 UPnP Port Mapping:      ${C_GREEN}Enabled for port ${bt_port_display} (requires router UPnP support)${C_RESET}"
+    else
+      echo -e " 🌐 UPnP Port Mapping:      ${C_YELLOW}Enabled, but miniupnpc is not installed${C_RESET}"
+    fi
   else
-    echo -e " 🌐 UPnP Port Mapping:      ${C_YELLOW}miniupnpc unavailable${C_RESET}"
-    echo -e "                            ${C_YELLOW}→ Forward TCP+UDP ${bt_port_display} to ${ip_addr} on your router${C_RESET}"
+    echo -e " 🌐 UPnP Port Mapping:      Disabled (optional)"
   fi
+  echo "                            Manage later: sudo dl2curl upnp install|enable|disable|uninstall"
   echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${ip_addr}:${HELPER_PORT}/diskspace${C_RESET}"
   if [ -f "/var/www/html/diskspace.php" ]; then
     echo -e " 🌐 Apache Helper URL:      http://${ip_addr}/diskspace.php"
@@ -165,11 +177,206 @@ show_summary() {
   echo ""
 }
 
+# ─── Optional UPnP Port Mapping ───────────────────────────────────────────────
+
+upnp_enabled() {
+  [ -f "$UPNP_DROPIN" ] || {
+    # Recognize installations made before UPnP became optional.
+    [ -f "$UPNP_SERVICE" ] && grep -Fq "$INSTALL_DIR/upnp-open.sh" "$UPNP_SERVICE"
+  }
+}
+
+upnp_port() {
+  grep -Po '(?<=^listen-port=)\d+' "$EXISTING_CONF" 2>/dev/null || echo 6881
+}
+
+upnp_status() {
+  if command -v upnpc >/dev/null 2>&1; then
+    echo "miniupnpc: Installed"
+  else
+    echo "miniupnpc: Not installed"
+  fi
+  if upnp_enabled; then
+    echo "Automatic torrent port mapping: Enabled (requires router UPnP support)"
+  else
+    echo "Automatic torrent port mapping: Disabled"
+  fi
+  echo "BitTorrent port: $(upnp_port)"
+}
+
+upnp_package() {
+  local action="$1"
+  if command -v apt-get >/dev/null 2>&1; then
+    if [ "$action" = install ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y miniupnpc
+    else
+      DEBIAN_FRONTEND=noninteractive apt-get remove -y miniupnpc
+    fi
+  elif command -v pacman >/dev/null 2>&1; then
+    if [ "$action" = install ]; then
+      pacman -S --noconfirm miniupnpc
+    else
+      pacman -R --noconfirm miniupnpc
+    fi
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf "$action" -y miniupnpc
+  elif command -v yum >/dev/null 2>&1; then
+    yum "$action" -y miniupnpc
+  elif command -v apk >/dev/null 2>&1; then
+    if [ "$action" = install ]; then
+      apk add --no-cache miniupnpc
+    else
+      apk del miniupnpc
+    fi
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive "$action" miniupnpc
+  else
+    echo "No supported package manager found. $action miniupnpc manually." >&2
+    return 1
+  fi
+}
+
+upnp_write_hooks() {
+  mkdir -p "$INSTALL_DIR" || return 1
+  {
+    printf '#!/usr/bin/env bash\nCONF=%q\nDROPIN=%q\n' "$EXISTING_CONF" "$UPNP_DROPIN"
+    cat <<'UPNP_OPEN'
+[ -f "$DROPIN" ] || exit 0
+command -v upnpc >/dev/null 2>&1 || exit 1
+PORT=$(grep -Po '(?<=^listen-port=)\d+' "$CONF" 2>/dev/null || echo 6881)
+TCP_OK=0
+UDP_OK=0
+upnpc -r "$PORT" TCP >/dev/null 2>&1 && TCP_OK=1
+upnpc -r "$PORT" UDP >/dev/null 2>&1 && UDP_OK=1
+if [ "$TCP_OK" = 1 ] && [ "$UDP_OK" = 1 ]; then
+  echo "UPnP: mapped torrent port $PORT TCP+UDP."
+else
+  echo "UPnP: could not map torrent port $PORT TCP+UDP. Check router UPnP support." >&2
+  exit 1
+fi
+UPNP_OPEN
+  } > "$INSTALL_DIR/upnp-open.sh" || return 1
+  {
+    printf '#!/usr/bin/env bash\nCONF=%q\n' "$EXISTING_CONF"
+    cat <<'UPNP_CLOSE'
+command -v upnpc >/dev/null 2>&1 || exit 0
+PORT=$(grep -Po '(?<=^listen-port=)\d+' "$CONF" 2>/dev/null || echo 6881)
+upnpc -d "$PORT" TCP >/dev/null 2>&1
+upnpc -d "$PORT" UDP >/dev/null 2>&1
+UPNP_CLOSE
+  } > "$INSTALL_DIR/upnp-close.sh" || return 1
+  chmod +x "$INSTALL_DIR/upnp-open.sh" "$INSTALL_DIR/upnp-close.sh"
+}
+
+upnp_set_enabled() {
+  local enabled="$1"
+  local apply_now="${2:-true}"
+  if [ "$enabled" = false ] && upnp_enabled; then
+    if command -v upnpc >/dev/null 2>&1; then
+      local port
+      port=$(upnp_port)
+      upnpc -d "$port" TCP >/dev/null 2>&1 || true
+      upnpc -d "$port" UDP >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Remove only the old dl2curl hooks; preserve all other service settings.
+  if [ -f "$UPNP_SERVICE" ] && grep -Fq "$INSTALL_DIR/upnp-open.sh" "$UPNP_SERVICE"; then
+    local service_temp
+    service_temp=$(mktemp "${UPNP_SERVICE}.XXXXXX") || return 1
+    if ! cp -p "$UPNP_SERVICE" "$service_temp" ||
+       ! awk -v open_hook="$INSTALL_DIR/upnp-open.sh" -v close_hook="$INSTALL_DIR/upnp-close.sh" \
+         '!(/^Exec(Start|Stop)Post=/ && (index($0, open_hook) || index($0, close_hook)))' "$UPNP_SERVICE" > "$service_temp" ||
+       ! mv "$service_temp" "$UPNP_SERVICE"; then
+      rm -f "$service_temp"
+      return 1
+    fi
+  fi
+
+  if [ "$enabled" = true ]; then
+    upnp_write_hooks || return 1
+    mkdir -p "$(dirname "$UPNP_DROPIN")" || return 1
+    cat > "$UPNP_DROPIN" <<EOF || return 1
+[Service]
+ExecStartPost=-/bin/bash ${INSTALL_DIR}/upnp-open.sh
+ExecStopPost=-/bin/bash ${INSTALL_DIR}/upnp-close.sh
+EOF
+  else
+    rm -f "$UPNP_DROPIN" || return 1
+  fi
+  systemctl daemon-reload || return 1
+  if [ "$enabled" = true ] && [ "$apply_now" = true ] && systemctl is-active --quiet aria2.service; then
+    bash "$INSTALL_DIR/upnp-open.sh" || return 1
+  fi
+}
+
+upnp_manage() {
+  local action="${1:-status}"
+  case "$action" in
+    status) upnp_status; return 0 ;;
+    install|enable|disable|uninstall) ;;
+    *) echo "Usage: dl2curl upnp [status|install|enable|disable|uninstall]" >&2; return 1 ;;
+  esac
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Please run as root: sudo dl2curl upnp $action" >&2
+    return 1
+  fi
+  case "$action" in
+    install)
+      local already_enabled=false
+      upnp_enabled && already_enabled=true
+      if ! command -v upnpc >/dev/null 2>&1; then
+        upnp_package install || return 1
+      fi
+      if ! command -v upnpc >/dev/null 2>&1; then
+        echo "miniupnpc installation did not provide upnpc." >&2
+        return 1
+      fi
+      upnp_write_hooks || return 1
+      if [ "$already_enabled" = true ]; then
+        upnp_set_enabled true false || return 1
+      fi
+      upnp_status
+      echo "To enable port mapping: sudo dl2curl upnp enable"
+      ;;
+    enable)
+      if [ ! -f "$EXISTING_CONF" ]; then
+        echo "Aria2 configuration not found at $EXISTING_CONF." >&2
+        return 1
+      fi
+      if ! command -v upnpc >/dev/null 2>&1; then
+        echo "Install miniupnpc first: sudo dl2curl upnp install" >&2
+        return 1
+      fi
+      upnp_set_enabled true || return 1
+      echo "Automatic torrent port mapping enabled."
+      ;;
+    disable|uninstall)
+      upnp_set_enabled false || return 1
+      echo "Automatic torrent port mapping disabled."
+      if [ "$action" = uninstall ]; then
+        if command -v upnpc >/dev/null 2>&1; then
+          upnp_package remove || return 1
+          if command -v upnpc >/dev/null 2>&1; then
+            echo "upnpc is still installed; remove its remaining installation manually." >&2
+            return 1
+          fi
+        fi
+        rm -f "$INSTALL_DIR/upnp-open.sh" "$INSTALL_DIR/upnp-close.sh" || return 1
+        echo "miniupnpc and dl2curl UPnP hooks uninstalled."
+      fi
+      ;;
+  esac
+}
+
 # ─── Install Global CLI Shortcut ──────────────────────────────────────────────
 
 install_cli_shortcut() {
-  cat << 'CLI_SCRIPT' > /usr/local/bin/dl2curl
-#!/usr/bin/env bash
+  {
+    printf '#!/usr/bin/env bash\nDEFAULT_RPC_SECRET=%q\n' "$DEFAULT_RPC_SECRET"
+    printf 'INSTALL_DIR=%q\nUPNP_SERVICE=%q\nUPNP_DROPIN=%q\n' "$INSTALL_DIR" "$UPNP_SERVICE" "$UPNP_DROPIN"
+    declare -f upnp_enabled upnp_port upnp_status upnp_package upnp_write_hooks upnp_set_enabled upnp_manage
+    cat << 'CLI_SCRIPT'
 set -u
 
 C_RESET="\033[0m"
@@ -183,14 +390,26 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$IP" ] && IP="127.0.0.1"
 
 CONF="/etc/aria2/aria2.conf"
+EXISTING_CONF="$CONF"
 TOKEN=""
 PORT="6800"
 DIR="/mnt/hdd/Downloads"
+HELPER_PORT="6801"
 
 if [ -f "$CONF" ]; then
   TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$CONF")
   PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$CONF" 2>/dev/null || echo "6800")
   DIR=$(grep -Po '(?<=^dir=).*' "$CONF" 2>/dev/null || echo "/mnt/hdd/Downloads")
+fi
+
+if [ -f "/etc/systemd/system/dl2curl-diskspace.service" ]; then
+  HELPER_PORT=$(grep -Po '(?<=diskspace\.py )\d+' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null || echo 6801)
+fi
+
+# Manage optional automatic torrent port mapping.
+if [ "${1:-}" = "upnp" ]; then
+  upnp_manage "${2:-status}"
+  exit $?
 fi
 
 # Quick token flag
@@ -215,15 +434,6 @@ if [ "${1:-}" = "settings" ] || [ "${1:-}" = "--settings" ]; then
   fi
 
   CURRENT_TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$CONF")
-  GENERATED_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || true)
-  if [ -z "$GENERATED_TOKEN" ]; then
-    GENERATED_TOKEN=$(openssl rand -hex 16 2>/dev/null || true)
-  fi
-  if [ -z "$GENERATED_TOKEN" ]; then
-    echo "Could not generate a secure token (need /dev/urandom or openssl)." >&2
-    exit 1
-  fi
-
   echo "Aria2 RPC secret settings:"
   if [ -n "$CURRENT_TOKEN" ]; then
     echo "  [1] Keep the current secret (default)"
@@ -233,11 +443,12 @@ if [ "${1:-}" = "settings" ] || [ "${1:-}" = "--settings" ]; then
     read -rp "Choose [1-4]: " SETTINGS_CHOICE || SETTINGS_CHOICE=""
     SETTINGS_CHOICE="${SETTINGS_CHOICE:-1}"
   else
-    echo "  [1] Generate and save a secure secret (default)"
-    echo "  [2] Enter a new secret"
-    echo "  [3] Disable RPC authentication (not recommended)"
-    read -rp "Choose [1-3]: " SETTINGS_CHOICE || SETTINGS_CHOICE=""
-    SETTINGS_CHOICE="${SETTINGS_CHOICE:-1}"
+    echo "  [1] Use the default secret ($DEFAULT_RPC_SECRET)"
+    echo "  [2] Generate and save a new secure secret"
+    echo "  [3] Enter a new secret"
+    echo "  [4] Keep RPC authentication disabled (default)"
+    read -rp "Choose [1-4]: " SETTINGS_CHOICE || SETTINGS_CHOICE=""
+    SETTINGS_CHOICE="${SETTINGS_CHOICE:-4}"
   fi
 
   case "$SETTINGS_CHOICE" in
@@ -245,40 +456,29 @@ if [ "${1:-}" = "settings" ] || [ "${1:-}" = "--settings" ]; then
       if [ -n "$CURRENT_TOKEN" ]; then
         NEW_TOKEN="$CURRENT_TOKEN"
       else
-        NEW_TOKEN="$GENERATED_TOKEN"
+        NEW_TOKEN="$DEFAULT_RPC_SECRET"
       fi
       ;;
     2)
-      if [ -n "$CURRENT_TOKEN" ]; then
-        NEW_TOKEN="$GENERATED_TOKEN"
-      else
-        read -rsp "Enter new secret: " NEW_TOKEN || NEW_TOKEN=""
-        echo
-        if [ -z "$NEW_TOKEN" ]; then
-          echo "Secret cannot be empty. No changes made." >&2
-          exit 1
-        fi
+      NEW_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || true)
+      if [ -z "$NEW_TOKEN" ]; then
+        NEW_TOKEN=$(openssl rand -hex 16 2>/dev/null || true)
+      fi
+      if [ -z "$NEW_TOKEN" ]; then
+        echo "Could not generate a secure token (need /dev/urandom or openssl)." >&2
+        exit 1
       fi
       ;;
     3)
-      if [ -n "$CURRENT_TOKEN" ]; then
-        read -rsp "Enter new secret: " NEW_TOKEN || NEW_TOKEN=""
-        echo
-        if [ -z "$NEW_TOKEN" ]; then
-          echo "Secret cannot be empty. No changes made." >&2
-          exit 1
-        fi
-      else
-        NEW_TOKEN=""
+      read -rsp "Enter new secret: " NEW_TOKEN || NEW_TOKEN=""
+      echo
+      if [ -z "$NEW_TOKEN" ]; then
+        echo "Secret cannot be empty. No changes made." >&2
+        exit 1
       fi
       ;;
     4)
-      if [ -n "$CURRENT_TOKEN" ]; then
-        NEW_TOKEN=""
-      else
-        echo "Invalid selection. No changes made." >&2
-        exit 1
-      fi
+      NEW_TOKEN=""
       ;;
     *)
       echo "Invalid selection. No changes made." >&2
@@ -360,18 +560,10 @@ if [ -n "$TOKEN" ]; then
 else
   echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
 fi
-echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${IP}:6801/diskspace${C_RESET}"
+echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${IP}:${HELPER_PORT}/diskspace${C_RESET}"
 echo ""
 
-# UPnP check
-if command -v upnpc >/dev/null 2>&1; then
-  UPNP_MAP=$(upnpc -l 2>/dev/null | grep "6881" | head -n 1 || true)
-  if [ -n "$UPNP_MAP" ]; then
-    echo -e " 🌐 UPnP Router Port:       ${C_GREEN}Port 6881 mapped on router ✓${C_RESET}"
-  else
-    echo -e " 🌐 UPnP Router Port:       ${C_YELLOW}Port 6881 not mapped yet${C_RESET}"
-  fi
-fi
+upnp_status
 
 # Aria2 process check
 if systemctl is-active --quiet aria2 2>/dev/null; then
@@ -385,13 +577,17 @@ echo -e "${C_BOLD}${C_YELLOW}👉 CHROME EXTENSION SETTINGS (⚙):${C_RESET}"
 echo -e "  • RPC URL:     http://${IP}:${PORT}/jsonrpc"
 echo -e "  • RPC Secret:  ${TOKEN:-[Leave empty]}"
 echo -e "  • Directory:   ${DIR}"
-echo -e "  • Script URL:  http://${IP}:6801/diskspace"
+echo -e "  • Script URL:  http://${IP}:${HELPER_PORT}/diskspace"
 echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
 echo "Quick shortcuts:"
 echo "  dl2curl token   → Print only the secret token"
 echo "  dl2curl tasks   → View active downloads"
+echo "  sudo dl2curl settings → Change the RPC secret"
+echo "  dl2curl upnp status → Show optional port mapping settings"
+echo "  sudo dl2curl upnp install|enable|disable|uninstall → Manage port mapping"
 echo ""
 CLI_SCRIPT
+  } > /usr/local/bin/dl2curl
   chmod +x /usr/local/bin/dl2curl 2>/dev/null || true
 }
 
@@ -424,7 +620,7 @@ if [ "$ACTION" = "status" ]; then
 fi
 
 DOWNLOADS_DIR="${CLI_DIR:-$EXISTING_DIR}"
-HELPER_PORT="${CLI_PORT:-$DEFAULT_HELPER_PORT}"
+HELPER_PORT="${CLI_PORT:-$EXISTING_HELPER_PORT}"
 ARIA2_RPC_PORT="$EXISTING_PORT"
 ARIA2_SECRET="$EXISTING_TOKEN"
 
@@ -435,7 +631,8 @@ TARGET_HELPER_PORT="${CLI_PORT:-$EXISTING_HELPER_PORT}"
 if [ "$FORCE_RECONFIGURE" = false ] && [ -f "$EXISTING_CONF" ]; then
   # If non-interactive OR if CLI arguments were passed that match existing configuration
   if [ "$INTERACTIVE" = false ] || [ -n "$CLI_DIR" ] || [ -n "$CLI_PORT" ]; then
-    if [ "$TARGET_DIR" = "$EXISTING_DIR" ] && [ "$TARGET_HELPER_PORT" = "$EXISTING_HELPER_PORT" ] && systemctl is-active --quiet aria2 2>/dev/null; then
+    if [ -z "$CLI_UPNP" ] && [ "$TARGET_DIR" = "$EXISTING_DIR" ] && [ "$TARGET_HELPER_PORT" = "$EXISTING_HELPER_PORT" ] &&
+       [ -f "$INSTALL_DIR/diskspace.py" ] && systemctl is-active --quiet aria2 2>/dev/null && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
       echo ""
       echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
       echo -e "${C_BOLD}${C_GREEN} ℹ️  dl2curl & Aria2 are already installed and running.${C_RESET}"
@@ -462,7 +659,7 @@ echo "microservice with automatic boot on systemd."
 echo ""
 
 # Interactive menu if already installed
-if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ]; then
+if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ] && [ "$FORCE_RECONFIGURE" = false ] && [ -z "$CLI_UPNP" ]; then
   echo -e "${C_GREEN}✓ Existing dl2curl & Aria2 installation detected!${C_RESET}"
   echo "What would you like to do?"
   echo -e "  [${C_BOLD}1${C_RESET}] View Status & RPC Token (Quick View)"
@@ -476,6 +673,7 @@ if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ]; then
       DOWNLOADS_DIR="$EXISTING_DIR"
       ARIA2_RPC_PORT="$EXISTING_PORT"
       ARIA2_SECRET="$EXISTING_TOKEN"
+      HELPER_PORT="$EXISTING_HELPER_PORT"
       show_summary
       exit 0
       ;;
@@ -704,86 +902,104 @@ configure_aria2_rpc() {
   echo "⚙️ Configuring Aria2 RPC..."
 
   # 1. RPC Port
-  local rpc_port="$DEFAULT_RPC_PORT"
+  local rpc_port="${EXISTING_PORT:-$DEFAULT_RPC_PORT}"
   if [ "$INTERACTIVE" = true ]; then
-    read -rp "Enter Aria2 RPC Port [default: $DEFAULT_RPC_PORT]: " p_in || p_in=""
-    rpc_port="${p_in:-$DEFAULT_RPC_PORT}"
+    read -rp "Enter Aria2 RPC Port [default: $rpc_port]: " p_in || p_in=""
+    rpc_port="${p_in:-$rpc_port}"
+  fi
+  if ! [[ "$rpc_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$rpc_port < 1 || 10#$rpc_port > 65535 )); then
+    echo "Aria2 RPC port must be between 1 and 65535." >&2
+    return 1
   fi
   ARIA2_RPC_PORT="$rpc_port"
 
   # 2. RPC Secret Token
-  local generated_token
-  generated_token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || openssl rand -hex 16 2>/dev/null || echo "aria2_$(date +%s)")
-  
-  local rpc_secret="${EXISTING_TOKEN:-$generated_token}"
+  local rpc_secret="$DEFAULT_RPC_SECRET"
+  if [ -f "$EXISTING_CONF" ]; then
+    rpc_secret="$EXISTING_TOKEN"
+  fi
   if [ "$INTERACTIVE" = true ]; then
     echo ""
     echo "Aria2 RPC Secret Token (Authentication):"
-    if [ -n "$EXISTING_TOKEN" ]; then
-      echo -e "  [${C_BOLD}1${C_RESET}] Keep current token (${C_GREEN}${EXISTING_TOKEN}${C_RESET}) [Recommended]"
-      echo -e "  [${C_BOLD}2${C_RESET}] Generate new random token (${C_YELLOW}${generated_token}${C_RESET})"
-      echo -e "  [${C_BOLD}3${C_RESET}] Enter your own custom secret token"
-      echo -e "  [${C_BOLD}4${C_RESET}] No secret (unauthenticated LAN access)"
-      read -rp "Choose authentication [1-4, default: 1]: " s_opt || s_opt=""
-      case "${s_opt:-1}" in
-        1) rpc_secret="$EXISTING_TOKEN" ;;
-        2) rpc_secret="$generated_token" ;;
-        3)
-          read -rp "Enter custom secret token: " custom_tok || custom_tok=""
-          rpc_secret="$custom_tok"
-          ;;
-        4) rpc_secret="" ;;
-        *) rpc_secret="$EXISTING_TOKEN" ;;
-      esac
+    if [ -f "$EXISTING_CONF" ]; then
+      echo -e "  [${C_BOLD}1${C_RESET}] Keep current token (${C_GREEN}${EXISTING_TOKEN:-None / Unauthenticated}${C_RESET}) [Default]"
     else
-      echo -e "  [${C_BOLD}1${C_RESET}] Generate strong random token (${C_GREEN}${generated_token}${C_RESET}) [Recommended]"
-      echo -e "  [${C_BOLD}2${C_RESET}] Enter your own custom secret token"
-      echo -e "  [${C_BOLD}3${C_RESET}] No secret (unauthenticated LAN access)"
-      read -rp "Choose authentication [1-3, default: 1]: " s_opt || s_opt=""
-      case "${s_opt:-1}" in
-        1) rpc_secret="$generated_token" ;;
-        2)
-          read -rp "Enter custom secret token: " custom_tok || custom_tok=""
-          rpc_secret="$custom_tok"
-          ;;
-        3) rpc_secret="" ;;
-        *) rpc_secret="$generated_token" ;;
-      esac
+      echo -e "  [${C_BOLD}1${C_RESET}] Use default token (${C_GREEN}${DEFAULT_RPC_SECRET}${C_RESET}) [Default]"
     fi
+    echo -e "  [${C_BOLD}2${C_RESET}] Generate new random token"
+    echo -e "  [${C_BOLD}3${C_RESET}] Enter your own custom secret token"
+    echo -e "  [${C_BOLD}4${C_RESET}] No secret (unauthenticated LAN access)"
+    read -rp "Choose authentication [1-4, default: 1]: " s_opt || s_opt=""
+    case "${s_opt:-1}" in
+      2)
+        rpc_secret=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || openssl rand -hex 16 2>/dev/null)
+        if [ -z "$rpc_secret" ]; then
+          echo "Could not generate a secure token (need /dev/urandom or openssl)." >&2
+          exit 1
+        fi
+        ;;
+      3)
+        read -rp "Enter custom secret token: " custom_tok || custom_tok=""
+        if [ -z "$custom_tok" ]; then
+          echo "Secret cannot be empty. No changes made." >&2
+          exit 1
+        fi
+        rpc_secret="$custom_tok"
+        ;;
+      4) rpc_secret="" ;;
+    esac
   fi
   ARIA2_SECRET="$rpc_secret"
 
   # 3. BitTorrent listen port
-  local bt_port=6881
+  local bt_port
+  bt_port=$(upnp_port)
   if [ "$INTERACTIVE" = true ]; then
     echo ""
     echo -e "${C_BOLD}${C_BLUE}─── BitTorrent Speed Optimisation ───${C_RESET}"
-    echo "For fast torrent speeds, Aria2 needs an open inbound port so peers"
-    echo "can connect back to your Pi (avoids 0 B/s stall with many peers)."
+    echo "An open inbound torrent port helps other peers connect to your Pi."
     echo ""
-    read -rp "Enter BitTorrent listen port [default: 6881]: " bt_in || bt_in=""
-    bt_port="${bt_in:-6881}"
+    read -rp "Enter BitTorrent listen port [default: $bt_port]: " bt_in || bt_in=""
+    bt_port="${bt_in:-$bt_port}"
+  fi
+  if ! [[ "$bt_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$bt_port < 1 || 10#$bt_port > 65535 )); then
+    echo "BitTorrent port must be between 1 and 65535." >&2
+    return 1
   fi
 
-  # Install miniupnpc — enables upnp-open.sh / upnp-close.sh called by aria2.service.
-  # The port is opened automatically each time Aria2 starts and released when it stops.
-  echo ""
-  echo "📦 Installing miniupnpc (automatic UPnP router port mapping)..."
-  UPNP_AVAILABLE=false
-  if command -v apt-get >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y miniupnpc >/dev/null 2>&1
-  elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm miniupnpc >/dev/null 2>&1
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y miniupnpc >/dev/null 2>&1
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache miniupnpc >/dev/null 2>&1
+  # Automatic port mapping is optional and requires an explicit choice on fresh installs.
+  local enable_upnp=false
+  upnp_enabled && enable_upnp=true
+  if [ -n "$CLI_UPNP" ]; then
+    enable_upnp="$CLI_UPNP"
+  elif [ "$INTERACTIVE" = true ]; then
+    echo ""
+    echo "Optional: install miniupnpc and automatically map the torrent port on your router."
+    echo "You can install, enable, disable, or uninstall this later with sudo dl2curl upnp."
+    local upnp_answer
+    if [ "$enable_upnp" = true ]; then
+      read -rp "Keep automatic torrent port mapping enabled? [Y/n]: " upnp_answer || upnp_answer=""
+      upnp_answer="${upnp_answer:-Y}"
+    else
+      read -rp "Install and enable automatic torrent port mapping (UPnP)? [y/N]: " upnp_answer || upnp_answer=""
+      upnp_answer="${upnp_answer:-N}"
+    fi
+    case "$upnp_answer" in
+      [yY]|[yY][eE][sS]) enable_upnp=true ;;
+      *) enable_upnp=false ;;
+    esac
   fi
-  command -v upnpc >/dev/null 2>&1 && UPNP_AVAILABLE=true || UPNP_AVAILABLE=false
-  if [ "$UPNP_AVAILABLE" = true ]; then
-    echo -e "   ${C_GREEN}✓ miniupnpc ready — Aria2 will auto-open port ${bt_port} on your router via UPnP.${C_RESET}"
+  # Release the previous port before configuration changes, including upgrades from legacy hooks.
+  upnp_set_enabled false || return 1
+  echo ""
+  if [ "$enable_upnp" = true ]; then
+    echo "📦 Installing optional UPnP port mapping..."
+    if ! upnp_manage install; then
+      echo "UPnP installation failed; continuing with automatic port mapping disabled." >&2
+      enable_upnp=false
+    fi
   else
-    echo -e "   ${C_YELLOW}⚠️ miniupnpc unavailable — forward port ${bt_port} TCP+UDP manually on your router.${C_RESET}"
+    echo "Automatic torrent port mapping skipped/disabled. You can enable it later."
   fi
 
   # 4. Write /etc/aria2/aria2.conf
@@ -829,8 +1045,7 @@ disk-cache=64M
 summary-interval=0
 
 # ── BitTorrent Speed Optimisation ─────────────────────────────────────────────
-# Without an open listen port, peers cannot connect back to your Pi → 0 B/s stall.
-# Forward TCP+UDP port ${bt_port} → this Pi's LAN IP on your router.
+# For inbound peers, optionally enable UPnP or forward TCP+UDP ${bt_port} to this Pi.
 listen-port=${bt_port}
 dht-listen-port=${bt_port}
 
@@ -858,37 +1073,7 @@ EOF
   touch /etc/aria2/aria2.session
   chmod 644 /etc/aria2/aria2.session
 
-  # 4. Write UPnP open/close helper scripts
-  #    These are called by aria2.service ExecStartPost / ExecStopPost
-  #    so the router port is open exactly while Aria2 is running.
-  mkdir -p "$INSTALL_DIR"
-
-  cat <<'UPNP_OPEN' > "$INSTALL_DIR/upnp-open.sh"
-#!/usr/bin/env bash
-# Called by aria2.service ExecStartPost — open BT port on router via UPnP.
-PORT="$(grep -Po '(?<=^listen-port=)\d+' /etc/aria2/aria2.conf 2>/dev/null || echo 6881)"
-if ! command -v upnpc >/dev/null 2>&1; then exit 0; fi
-upnpc -r "$PORT" TCP >/dev/null 2>&1
-upnpc -r "$PORT" UDP >/dev/null 2>&1
-EXT="$(upnpc -s 2>/dev/null | awk -F= '/ExternalIPAddress/{gsub(/ /,"",$2); print $2}')"
-echo "$(date '+%Y-%m-%d %H:%M:%S') [upnp-open] port $PORT mapped (external: ${EXT:-unknown})"
-UPNP_OPEN
-
-  cat <<'UPNP_CLOSE' > "$INSTALL_DIR/upnp-close.sh"
-#!/usr/bin/env bash
-# Called by aria2.service ExecStopPost — release port mapping when Aria2 stops.
-PORT="$(grep -Po '(?<=^listen-port=)\d+' /etc/aria2/aria2.conf 2>/dev/null || echo 6881)"
-if ! command -v upnpc >/dev/null 2>&1; then exit 0; fi
-upnpc -d "$PORT" TCP >/dev/null 2>&1
-upnpc -d "$PORT" UDP >/dev/null 2>&1
-echo "$(date '+%Y-%m-%d %H:%M:%S') [upnp-close] port $PORT released"
-UPNP_CLOSE
-
-  chmod +x "$INSTALL_DIR/upnp-open.sh" "$INSTALL_DIR/upnp-close.sh"
-
-  # 5. Create /etc/systemd/system/aria2.service
-  #    ExecStartPost runs upnp-open.sh after Aria2 is up (non-blocking).
-  #    ExecStopPost  runs upnp-close.sh after Aria2 exits.
+  # 5. Create /etc/systemd/system/aria2.service. Optional UPnP hooks live in a drop-in.
   local aria_bin
   aria_bin=$(command -v aria2c || echo "/usr/bin/aria2c")
   cat <<EOF > "/etc/systemd/system/aria2.service"
@@ -901,8 +1086,6 @@ Wants=network-online.target
 Type=simple
 User=root
 ExecStart=${aria_bin} --conf-path=${conf_file}
-ExecStartPost=-/bin/bash ${INSTALL_DIR}/upnp-open.sh
-ExecStopPost=-/bin/bash ${INSTALL_DIR}/upnp-close.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -912,6 +1095,9 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
+  if [ "$enable_upnp" = true ]; then
+    upnp_set_enabled true false || return 1
+  fi
   systemctl daemon-reload
   systemctl enable aria2.service 2>/dev/null || true
   systemctl restart aria2.service 2>/dev/null || true
@@ -919,17 +1105,14 @@ EOF
 
   if systemctl is-active --quiet aria2.service 2>/dev/null; then
     echo -e "   ${C_GREEN}✓ Aria2 service active on port ${ARIA2_RPC_PORT}${C_RESET}"
-    echo -e "   ${C_GREEN}✓ UPnP hooks installed — port ${bt_port} opens/closes with Aria2${C_RESET}"
+    if upnp_enabled; then
+      echo -e "   ${C_GREEN}✓ Optional UPnP enabled for torrent port ${bt_port}${C_RESET}"
+    fi
   else
     echo -e "   ${C_YELLOW}⚠️ aria2.service created. Check: journalctl -u aria2 -n 20${C_RESET}"
   fi
 
-  # Export so show_summary can check UPnP availability
   BT_PORT="$bt_port"
-  UPNP_AVAILABLE=false
-  if command -v upnpc >/dev/null 2>&1; then
-    UPNP_AVAILABLE=true
-  fi
 }
 
 # ─── Step 4: dl2curl Health & Disk Space Helper Setup ─────────────────────────
@@ -938,24 +1121,48 @@ setup_health_helper() {
   echo ""
   echo -e "${C_BOLD}${C_BLUE}─── Step 3: dl2curl Health & Disk Space Helper Setup ───${C_RESET}"
 
-  local helper_port="${CLI_PORT:-$DEFAULT_HELPER_PORT}"
+  local helper_port="${CLI_PORT:-$EXISTING_HELPER_PORT}"
   if [ "$INTERACTIVE" = true ]; then
     read -rp "Enter Health Helper microservice port [default: $helper_port]: " h_in || h_in=""
     helper_port="${h_in:-$helper_port}"
+  fi
+  if ! [[ "$helper_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$helper_port < 1 || 10#$helper_port > 65535 )); then
+    echo "Health helper port must be between 1 and 65535." >&2
+    return 1
   fi
   HELPER_PORT="$helper_port"
 
   echo "📁 Setting up $INSTALL_DIR..."
   mkdir -p "$INSTALL_DIR"
 
+  local python_bin
+  python_bin=$(command -v python3) || {
+    echo "Python 3 is required for the health helper. Install python3 and rerun setup." >&2
+    return 1
+  }
+  local helper_temp
+  helper_temp=$(mktemp "$INSTALL_DIR/diskspace.py.XXXXXX") || return 1
   SCRIPT_SRC="$(dirname "$0")/diskspace.py"
   if [ -f "$SCRIPT_SRC" ]; then
-    cp "$SCRIPT_SRC" "$INSTALL_DIR/diskspace.py"
+    if ! cp "$SCRIPT_SRC" "$helper_temp"; then
+      rm -f "$helper_temp"
+      return 1
+    fi
   else
     echo "⬇ Downloading diskspace.py from repository..."
-    curl -sSL "https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/diskspace.py" -o "$INSTALL_DIR/diskspace.py"
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/diskspace.py" -o "$helper_temp"; then
+      rm -f "$helper_temp"
+      echo "Could not download the health helper. Existing installation was kept." >&2
+      return 1
+    fi
   fi
-  chmod +x "$INSTALL_DIR/diskspace.py"
+  if ! "$python_bin" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$helper_temp"; then
+    rm -f "$helper_temp"
+    echo "Downloaded helper is not a valid Python script. Existing installation was kept." >&2
+    return 1
+  fi
+  chmod +x "$helper_temp"
+  mv "$helper_temp" "$INSTALL_DIR/diskspace.py" || return 1
 
   # Optional Apache PHP copy
   PHP_SRC="$(dirname "$0")/diskspace.php"
@@ -967,8 +1174,15 @@ setup_health_helper() {
       echo "   ✓ Copied PHP helper to /var/www/html/diskspace.php (Port 80)"
     else
       echo "⬇ Downloading diskspace.php from repository..."
-      curl -sSL "https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/diskspace.php" -o "/var/www/html/diskspace.php" 2>/dev/null || true
-      chmod 644 "/var/www/html/diskspace.php" 2>/dev/null || true
+      local php_temp
+      php_temp=$(mktemp "/var/www/html/diskspace.php.XXXXXX") || return 1
+      if curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/diskspace.php" -o "$php_temp"; then
+        chmod 644 "$php_temp"
+        mv "$php_temp" "/var/www/html/diskspace.php"
+      else
+        rm -f "$php_temp"
+        echo "Optional PHP helper download failed; keeping any existing PHP helper." >&2
+      fi
     fi
   fi
 
@@ -981,7 +1195,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/diskspace.py ${HELPER_PORT} "${DOWNLOADS_DIR}"
+ExecStart=${python_bin} ${INSTALL_DIR}/diskspace.py ${HELPER_PORT} "${DOWNLOADS_DIR}"
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -991,9 +1205,10 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable "$SERVICE_NAME" 2>/dev/null || true
-  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+  if ! systemctl daemon-reload || ! systemctl enable "$SERVICE_NAME" || ! systemctl restart "$SERVICE_NAME"; then
+    echo "Could not start the health helper. Check: systemctl status $SERVICE_NAME" >&2
+    return 1
+  fi
 
   sleep 1
 
@@ -1001,6 +1216,7 @@ EOF
     echo -e "   ${C_GREEN}✓ dl2curl Health Helper service is active and running on port ${HELPER_PORT}!${C_RESET}"
   else
     echo -e "   ${C_YELLOW}⚠️ Helper service created. Check: journalctl -u $SERVICE_NAME -n 20${C_RESET}"
+    return 1
   fi
 }
 
@@ -1008,6 +1224,6 @@ EOF
 
 select_storage
 install_aria2_package
-setup_health_helper
+setup_health_helper || exit 1
 install_cli_shortcut
 show_summary

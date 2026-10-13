@@ -20,6 +20,7 @@
  */
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
@@ -46,6 +47,11 @@ if (!file_exists($checkPath)) {
 // ── 1. Disk Space ───────────────────────────────────────────────────────────
 $freeBytes  = @disk_free_space($checkPath);
 $totalBytes = @disk_total_space($checkPath);
+if ($freeBytes === false || $totalBytes === false) {
+    http_response_code(500);
+    echo json_encode(['status' => 'error', 'error' => 'Could not read disk capacity for the requested path.']);
+    exit;
+}
 
 $freeGb      = ($freeBytes !== false) ? round($freeBytes / (1024 * 1024 * 1024), 2) : 0;
 $totalGb     = ($totalBytes !== false) ? round($totalBytes / (1024 * 1024 * 1024), 2) : 0;
@@ -161,7 +167,7 @@ if (file_exists('/proc')) {
 $response = [
     'status'       => 'ok',
     'helper'       => 'dl2curl-pi-helper',
-    'version'      => '1.1.0',
+    'version'      => '1.2.0',
     'timestamp'    => time(),
     'hostname'     => gethostname() ?: 'raspberrypi',
     // Backward-compatible top-level keys

@@ -29,11 +29,21 @@ import shutil
 import time
 import socket
 import tempfile
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 DEFAULT_PORT = 6801
-DEFAULT_PATH = '/mnt/hdd/Downloads' if os.path.exists('/mnt/hdd/Downloads') else os.getcwd()
+DEFAULT_PATH = '/mnt/hdd/Downloads'
+HELPER_VERSION = '1.2.0'
+
+
+class HTTPServer(ThreadingHTTPServer):
+    """Handle simultaneous extension checks without one slow client blocking them."""
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(10)
+        return connection, address
 
 
 def get_cpu_temp():
@@ -176,6 +186,16 @@ class DiskSpaceHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
+    def send_json(self, response, status=200):
+        payload = json.dumps(response).encode('utf-8')
+        self.send_response(status)
+        self.send_cors_headers()
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_cors_headers()
@@ -183,6 +203,12 @@ class DiskSpaceHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == '/health':
+            self.send_json({'status': 'ok', 'helper': 'dl2curl-pi-helper', 'version': HELPER_VERSION})
+            return
+        if parsed.path != '/diskspace':
+            self.send_json({'status': 'error', 'error': 'Endpoint not found. Use /diskspace or /health.'}, 404)
+            return
         qs = parse_qs(parsed.query)
 
         requested_path = qs.get('path', [DEFAULT_PATH])[0]
@@ -220,7 +246,7 @@ class DiskSpaceHandler(BaseHTTPRequestHandler):
             response = {
                 'status': 'ok',
                 'helper': 'dl2curl-pi-helper',
-                'version': '1.1.0',
+                'version': HELPER_VERSION,
                 'timestamp': int(time.time()),
                 'hostname': socket.gethostname(),
                 # Top-level backward compatibility
@@ -258,26 +284,21 @@ class DiskSpaceHandler(BaseHTTPRequestHandler):
                 }
             }
 
-            payload = json.dumps(response, indent=2).encode('utf-8')
-            self.send_response(200)
-            self.send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Content-Length', str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self.send_json(response)
 
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # The extension may cancel a request when its popup closes.
         except Exception as e:
-            err_payload = json.dumps({'status': 'error', 'error': str(e)}).encode('utf-8')
-            self.send_response(500)
-            self.send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Content-Length', str(len(err_payload)))
-            self.end_headers()
-            self.wfile.write(err_payload)
+            self.send_json({'status': 'error', 'error': str(e)}, 500)
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else DEFAULT_PORT
+    try:
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+    except ValueError:
+        raise SystemExit('Helper port must be between 1 and 65535.') from None
+    if not 1 <= port <= 65535:
+        raise SystemExit('Helper port must be between 1 and 65535.')
     if len(sys.argv) > 2:
         global DEFAULT_PATH
         DEFAULT_PATH = sys.argv[2]
@@ -292,6 +313,7 @@ def main():
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down server.")
+    finally:
         httpd.server_close()
 
 
