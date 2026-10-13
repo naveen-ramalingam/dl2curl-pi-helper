@@ -98,7 +98,7 @@ EXISTING_DIR="$DEFAULT_DOWNLOADS_DIR"
 EXISTING_HELPER_PORT="$DEFAULT_HELPER_PORT"
 
 if [ -f "$EXISTING_CONF" ]; then
-  EXISTING_TOKEN=$(grep -Po '(?<=^rpc-secret=).*' "$EXISTING_CONF" 2>/dev/null || true)
+  EXISTING_TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$EXISTING_CONF")
   EXISTING_PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_RPC_PORT")
   EXISTING_DIR=$(grep -Po '(?<=^dir=).*' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_DOWNLOADS_DIR")
 fi
@@ -188,7 +188,7 @@ PORT="6800"
 DIR="/mnt/hdd/Downloads"
 
 if [ -f "$CONF" ]; then
-  TOKEN=$(grep -Po '(?<=^rpc-secret=).*' "$CONF" 2>/dev/null || true)
+  TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$CONF")
   PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$CONF" 2>/dev/null || echo "6800")
   DIR=$(grep -Po '(?<=^dir=).*' "$CONF" 2>/dev/null || echo "/mnt/hdd/Downloads")
 fi
@@ -199,6 +199,141 @@ if [ "${1:-}" = "token" ] || [ "${1:-}" = "--token" ]; then
     echo "$TOKEN"
   else
     echo "None (unauthenticated)"
+  fi
+  exit 0
+fi
+
+# Update the Aria2 RPC secret without rerunning the full installer.
+if [ "${1:-}" = "settings" ] || [ "${1:-}" = "--settings" ]; then
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Please run as root: sudo dl2curl settings" >&2
+    exit 1
+  fi
+  if [ ! -f "$CONF" ]; then
+    echo "Aria2 configuration not found at $CONF" >&2
+    exit 1
+  fi
+
+  CURRENT_TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$CONF")
+  GENERATED_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || true)
+  if [ -z "$GENERATED_TOKEN" ]; then
+    GENERATED_TOKEN=$(openssl rand -hex 16 2>/dev/null || true)
+  fi
+  if [ -z "$GENERATED_TOKEN" ]; then
+    echo "Could not generate a secure token (need /dev/urandom or openssl)." >&2
+    exit 1
+  fi
+
+  echo "Aria2 RPC secret settings:"
+  if [ -n "$CURRENT_TOKEN" ]; then
+    echo "  [1] Keep the current secret (default)"
+    echo "  [2] Generate and save a new secure secret"
+    echo "  [3] Enter a new secret"
+    echo "  [4] Disable RPC authentication (not recommended)"
+    read -rp "Choose [1-4]: " SETTINGS_CHOICE || SETTINGS_CHOICE=""
+    SETTINGS_CHOICE="${SETTINGS_CHOICE:-1}"
+  else
+    echo "  [1] Generate and save a secure secret (default)"
+    echo "  [2] Enter a new secret"
+    echo "  [3] Disable RPC authentication (not recommended)"
+    read -rp "Choose [1-3]: " SETTINGS_CHOICE || SETTINGS_CHOICE=""
+    SETTINGS_CHOICE="${SETTINGS_CHOICE:-1}"
+  fi
+
+  case "$SETTINGS_CHOICE" in
+    1)
+      if [ -n "$CURRENT_TOKEN" ]; then
+        NEW_TOKEN="$CURRENT_TOKEN"
+      else
+        NEW_TOKEN="$GENERATED_TOKEN"
+      fi
+      ;;
+    2)
+      if [ -n "$CURRENT_TOKEN" ]; then
+        NEW_TOKEN="$GENERATED_TOKEN"
+      else
+        read -rsp "Enter new secret: " NEW_TOKEN || NEW_TOKEN=""
+        echo
+        if [ -z "$NEW_TOKEN" ]; then
+          echo "Secret cannot be empty. No changes made." >&2
+          exit 1
+        fi
+      fi
+      ;;
+    3)
+      if [ -n "$CURRENT_TOKEN" ]; then
+        read -rsp "Enter new secret: " NEW_TOKEN || NEW_TOKEN=""
+        echo
+        if [ -z "$NEW_TOKEN" ]; then
+          echo "Secret cannot be empty. No changes made." >&2
+          exit 1
+        fi
+      else
+        NEW_TOKEN=""
+      fi
+      ;;
+    4)
+      if [ -n "$CURRENT_TOKEN" ]; then
+        NEW_TOKEN=""
+      else
+        echo "Invalid selection. No changes made." >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "Invalid selection. No changes made." >&2
+      exit 1
+      ;;
+  esac
+
+  if [ "$NEW_TOKEN" = "$CURRENT_TOKEN" ]; then
+    echo "RPC secret unchanged; no service restart needed."
+    if [ -n "$NEW_TOKEN" ]; then
+      echo "Current RPC secret (enter this in the extension's RPC Secret setting):"
+      echo "$NEW_TOKEN"
+    else
+      echo "RPC authentication remains disabled."
+    fi
+    exit 0
+  fi
+
+  CONFIG_BACKUP="${CONF}.bak.$(date +%s)"
+  if ! cp -p "$CONF" "$CONFIG_BACKUP"; then
+    echo "Could not back up $CONF. No changes made." >&2
+    exit 1
+  fi
+  CONFIG_TEMP=$(mktemp "${CONF}.XXXXXX") || {
+    echo "Could not create a temporary config file. No changes made." >&2
+    exit 1
+  }
+  chmod 600 "$CONFIG_TEMP"
+  if ! awk '!/^rpc-secret=/' "$CONF" > "$CONFIG_TEMP"; then
+    rm -f "$CONFIG_TEMP"
+    echo "Could not prepare the updated config. No changes made." >&2
+    exit 1
+  fi
+  if [ -n "$NEW_TOKEN" ]; then
+    printf 'rpc-secret=%s\n' "$NEW_TOKEN" >> "$CONFIG_TEMP"
+  fi
+  if ! mv "$CONFIG_TEMP" "$CONF"; then
+    rm -f "$CONFIG_TEMP"
+    echo "Could not save the updated config. No changes made." >&2
+    exit 1
+  fi
+
+  if systemctl restart aria2.service 2>/dev/null && systemctl is-active --quiet aria2.service 2>/dev/null; then
+    echo "Aria2 RPC secret saved and service restarted."
+    if [ -n "$NEW_TOKEN" ]; then
+      echo "New RPC secret (enter this in the extension's RPC Secret setting):"
+      echo "$NEW_TOKEN"
+    else
+      echo "RPC authentication is disabled."
+    fi
+  else
+    echo "The secret was saved, but aria2.service did not restart successfully." >&2
+    echo "Check the service with: systemctl status aria2.service" >&2
+    echo "Previous config backup: $CONFIG_BACKUP" >&2
+    exit 1
   fi
   exit 0
 fi
@@ -875,6 +1010,3 @@ install_aria2_package
 setup_health_helper
 install_cli_shortcut
 show_summary
-
-
-

@@ -72,7 +72,16 @@ This displays a clean status card with your:
 ```bash
 dl2curl token    # Print only the raw secret token (easy to copy)
 dl2curl tasks    # View active torrents and download speeds
+sudo dl2curl settings  # Keep, generate, or manually change the saved RPC secret
 ```
+
+The installer creates a secure RPC secret by default and saves it in
+`/etc/aria2/aria2.conf`. Re-running the installer keeps the existing secret
+unless you explicitly choose another option. To change it later without
+reconfiguring the rest of the server, run `sudo dl2curl settings` and choose
+to keep the current secret, generate a new one, enter a custom secret, or
+disable authentication. The service is restarted after the change, and the
+new secret is shown for entering in the extension's **RPC Secret** setting.
 
 ### Interactive Installer Menu:
 When re-running the 1-line installer:
@@ -121,4 +130,3 @@ If you do not install this helper:
 Since the main extension repository is private, the helper installer is hosted on a public repository for unauthenticated curl installation:
 - **Public Repo**: [https://github.com/naveen-ramalingam/dl2curl-pi-helper](https://github.com/naveen-ramalingam/dl2curl-pi-helper)
 - **Deployment & Sync Guide**: See [DEPLOYMENT.md](./DEPLOYMENT.md) for details on GitHub Actions automatic sync and credential configuration.
-
