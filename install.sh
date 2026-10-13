@@ -13,6 +13,15 @@
 # ==============================================================================
 
 set -uo pipefail
+HELPER_VERSION="1.3.0"
+HELPER_REPOSITORY_URL="https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper"
+HELPER_SOURCE_URL="${HELPER_REPOSITORY_URL}/v${HELPER_VERSION}"
+HELPER_UPDATES_URL="${HELPER_REPOSITORY_URL}/main/release.json"
+
+if [ "${1:-}" = version ] || [ "${1:-}" = --version ] || [ "${1:-}" = -V ]; then
+  echo "dl2curl Pi installer $HELPER_VERSION"
+  exit 0
+fi
 
 # ANSI color codes
 if [ -t 1 ]; then
@@ -77,6 +86,9 @@ for arg in "$@"; do
     tasks|--tasks|live|--live)
       ACTION="tasks"
       ;;
+    update|--update)
+      ACTION="update"
+      ;;
     -f|--force)
       FORCE_RECONFIGURE=true
       ;;
@@ -134,6 +146,7 @@ show_summary() {
   echo -e "${C_BOLD}${C_GREEN} 🎉 dl2curl & Aria2 Installation & Status${C_RESET}"
   echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
   echo -e " 🖥️  Host IP Address:        ${C_BOLD}${ip_addr}${C_RESET}"
+  echo " 💓 Installed Helper:       $(helper_installed_version)"
   echo -e " 📁 Download Folder:        ${C_BOLD}${DOWNLOADS_DIR}${C_RESET}"
   if [ -n "${ARIA2_RPC_PORT:-}" ]; then
     if systemctl is-active --quiet aria2.service 2>/dev/null; then
@@ -369,13 +382,104 @@ upnp_manage() {
   esac
 }
 
+# ─── Helper Versions & Updates ───────────────────────────────────────────────
+
+helper_installed_version() {
+  python3 - "$INSTALL_DIR/diskspace.py" <<'VERSION_PY' | tr -d '\r'
+import ast, re, sys
+try:
+    tree = ast.parse(open(sys.argv[1], encoding='utf-8').read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'HELPER_VERSION' for target in node.targets):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, str) and re.fullmatch(r'\d+\.\d+\.\d+', value):
+                print(value)
+                raise SystemExit
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value == 'version' and isinstance(value, ast.Constant) and isinstance(value.value, str) and re.fullmatch(r'\d+\.\d+\.\d+', value.value):
+                    print(value.value)
+                    raise SystemExit
+except (OSError, SyntaxError, ValueError):
+    pass
+print('unknown')
+VERSION_PY
+}
+
+helper_fetch_updates() {
+  local metadata versions
+  metadata=$(curl -fsSL --connect-timeout 3 --max-time 5 "$HELPER_UPDATES_URL") || return 1
+  versions=$(python3 -c 'import json, re, sys
+data = json.load(sys.stdin)
+for key in ("helper_version", "extension_version"):
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(r"\d+\.\d+\.\d+", value):
+        raise SystemExit("Invalid update metadata")
+    print(value)' <<< "$metadata") || return 1
+  LATEST_HELPER_VERSION=$(printf '%s\n' "$versions" | head -n 1 | tr -d '\r')
+  LATEST_EXTENSION_VERSION=$(printf '%s\n' "$versions" | tail -n 1 | tr -d '\r')
+}
+
+helper_check_updates() {
+  local installed
+  installed=$(helper_installed_version)
+  echo "Installed helper: $installed (CLI $HELPER_VERSION)"
+  if ! helper_fetch_updates; then
+    echo "Latest GitHub versions: unavailable. Check your internet connection."
+    return 1
+  fi
+  echo "Latest helper on GitHub: $LATEST_HELPER_VERSION"
+  echo "Latest extension on GitHub: $LATEST_EXTENSION_VERSION"
+  if python3 -c 'import sys; key=lambda s: tuple(map(int, s.split("."))); raise SystemExit(0 if sys.argv[1] == "unknown" or key(sys.argv[2]) > key(sys.argv[1]) else 1)' "$installed" "$LATEST_HELPER_VERSION"; then
+    echo "Helper update available. Run sudo dl2curl update or select Update in the menu."
+  else
+    echo "Helper is up to date."
+  fi
+}
+
+helper_pull_latest() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Please run as root: sudo dl2curl update" >&2
+    return 1
+  fi
+  helper_check_updates || return 1
+  local installed
+  installed=$(helper_installed_version)
+  if [ "$installed" != unknown ] && python3 -c 'import sys; key=lambda s: tuple(map(int, s.split("."))); raise SystemExit(0 if key(sys.argv[1]) >= key(sys.argv[3]) and key(sys.argv[2]) >= key(sys.argv[3]) else 1)' "$installed" "$HELPER_VERSION" "$LATEST_HELPER_VERSION"; then
+    return 0
+  fi
+  local update_dir downloaded_version result
+  update_dir=$(mktemp -d) || return 1
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "${HELPER_REPOSITORY_URL}/v${LATEST_HELPER_VERSION}/install.sh" -o "$update_dir/install.sh" ||
+     ! bash -n "$update_dir/install.sh"; then
+    rm -f "$update_dir/install.sh"
+    rmdir "$update_dir"
+    echo "Could not download a valid versioned installer. Existing helper was kept." >&2
+    return 1
+  fi
+  downloaded_version=$(sed -n 's/^HELPER_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$update_dir/install.sh")
+  if [ "$downloaded_version" != "$LATEST_HELPER_VERSION" ]; then
+    rm -f "$update_dir/install.sh"
+    rmdir "$update_dir"
+    echo "Installer version does not match the published release. Existing helper was kept." >&2
+    return 1
+  fi
+  bash "$update_dir/install.sh" update --non-interactive
+  result=$?
+  rm -f "$update_dir/install.sh"
+  rmdir "$update_dir"
+  return "$result"
+}
+
 # ─── Install Global CLI Shortcut ──────────────────────────────────────────────
 
 install_cli_shortcut() {
   {
     printf '#!/usr/bin/env bash\nDEFAULT_RPC_SECRET=%q\n' "$DEFAULT_RPC_SECRET"
     printf 'INSTALL_DIR=%q\nUPNP_SERVICE=%q\nUPNP_DROPIN=%q\n' "$INSTALL_DIR" "$UPNP_SERVICE" "$UPNP_DROPIN"
+    printf 'HELPER_VERSION=%q\nHELPER_REPOSITORY_URL=%q\nHELPER_UPDATES_URL=%q\n' "$HELPER_VERSION" "$HELPER_REPOSITORY_URL" "$HELPER_UPDATES_URL"
     declare -f upnp_enabled upnp_port upnp_status upnp_package upnp_write_hooks upnp_set_enabled upnp_manage
+    declare -f helper_installed_version helper_fetch_updates helper_check_updates helper_pull_latest
     cat << 'CLI_SCRIPT'
 set -u
 
@@ -395,6 +499,16 @@ TOKEN=""
 PORT="6800"
 DIR="/mnt/hdd/Downloads"
 HELPER_PORT="6801"
+
+case "${1:-}" in
+  version|--version|-V)
+    echo "dl2curl Pi CLI $HELPER_VERSION"
+    echo "Installed helper: $(helper_installed_version)"
+    exit 0
+    ;;
+  check-updates|--check-updates) helper_check_updates; exit $? ;;
+  update|--update) helper_pull_latest; exit $? ;;
+esac
 
 if [ -f "$CONF" ]; then
   TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$CONF")
@@ -561,6 +675,9 @@ else
   echo -e " 🔑 Aria2 Secret Token:     ${C_YELLOW}(None / Unauthenticated)${C_RESET}"
 fi
 echo -e " 💓 Health Helper URL:      ${C_BOLD}http://${IP}:${HELPER_PORT}/diskspace${C_RESET}"
+helper_check_updates || true
+LAST_EXTENSION_VERSION=$(curl -fsSL --connect-timeout 1 --max-time 2 "http://127.0.0.1:${HELPER_PORT}/health" 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("extension", {}).get("version") or "Not connected yet")' 2>/dev/null || echo "Unavailable")
+echo "Extension last connected to this Pi: $LAST_EXTENSION_VERSION"
 echo ""
 
 upnp_status
@@ -585,10 +702,36 @@ echo "  dl2curl tasks   → View active downloads"
 echo "  sudo dl2curl settings → Change the RPC secret"
 echo "  dl2curl upnp status → Show optional port mapping settings"
 echo "  sudo dl2curl upnp install|enable|disable|uninstall → Manage port mapping"
+echo "  dl2curl version|check-updates → Show installed and latest versions"
+echo "  sudo dl2curl update → Pull the latest versioned helper and CLI"
+echo "  dl2curl menu → Open the interactive menu"
 echo ""
+
+if [ "${1:-}" = menu ] || { [ -z "${1:-}" ] && [ -t 0 ]; }; then
+  while true; do
+    echo "  [1] Check latest helper and extension versions"
+    echo "  [2] Update helper and CLI from GitHub"
+    echo "  [3] Change RPC token"
+    echo "  [4] Manage optional UPnP port mapping"
+    echo "  [0] Exit"
+    read -rp "Choose [0-4, default: 0]: " menu_choice || menu_choice=""
+    case "${menu_choice:-0}" in
+      1) helper_check_updates || true ;;
+      2) helper_pull_latest; exit $? ;;
+      3) bash "$0" settings ;;
+      4)
+        echo "UPnP actions: status, install, enable, disable, uninstall"
+        read -rp "Action [default: status]: " upnp_action || upnp_action=""
+        upnp_manage "${upnp_action:-status}" || true
+        ;;
+      0) exit 0 ;;
+      *) echo "Invalid selection." ;;
+    esac
+  done
+fi
 CLI_SCRIPT
-  } > /usr/local/bin/dl2curl
-  chmod +x /usr/local/bin/dl2curl 2>/dev/null || true
+  } > /usr/local/bin/dl2curl || return 1
+  chmod +x /usr/local/bin/dl2curl || return 1
 }
 
 # Quick CLI commands
@@ -628,7 +771,7 @@ ARIA2_SECRET="$EXISTING_TOKEN"
 TARGET_DIR="${CLI_DIR:-$EXISTING_DIR}"
 TARGET_HELPER_PORT="${CLI_PORT:-$EXISTING_HELPER_PORT}"
 
-if [ "$FORCE_RECONFIGURE" = false ] && [ -f "$EXISTING_CONF" ]; then
+if [ "$ACTION" = setup ] && [ "$FORCE_RECONFIGURE" = false ] && [ -f "$EXISTING_CONF" ]; then
   # If non-interactive OR if CLI arguments were passed that match existing configuration
   if [ "$INTERACTIVE" = false ] || [ -n "$CLI_DIR" ] || [ -n "$CLI_PORT" ]; then
     if [ -z "$CLI_UPNP" ] && [ "$TARGET_DIR" = "$EXISTING_DIR" ] && [ "$TARGET_HELPER_PORT" = "$EXISTING_HELPER_PORT" ] &&
@@ -650,6 +793,7 @@ if [ "$FORCE_RECONFIGURE" = false ] && [ -f "$EXISTING_CONF" ]; then
   fi
 fi
 
+if [ "$ACTION" = setup ]; then
 echo ""
 echo -e "${C_BOLD}${C_CYAN}==============================================================${C_RESET}"
 echo -e "${C_BOLD} 🚀 dl2curl & Aria2 Complete Interactive Setup for Raspberry Pi${C_RESET}"
@@ -665,9 +809,11 @@ if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ] && [ "$FORCE_RECONFIGURE
   echo -e "  [${C_BOLD}1${C_RESET}] View Status & RPC Token (Quick View)"
   echo -e "  [${C_BOLD}2${C_RESET}] Reconfigure / Run Full Setup"
   echo -e "  [${C_BOLD}3${C_RESET}] View Live Active Downloads"
-  echo -e "  [${C_BOLD}4${C_RESET}] Exit"
+  echo -e "  [${C_BOLD}4${C_RESET}] Update helper and CLI only (v${HELPER_VERSION})"
+  echo -e "  [${C_BOLD}5${C_RESET}] Change RPC token"
+  echo -e "  [${C_BOLD}6${C_RESET}] Exit"
   echo ""
-  read -rp "Select option [1-4, default: 1]: " menu_choice || menu_choice=""
+  read -rp "Select option [1-6, default: 1]: " menu_choice || menu_choice=""
   case "${menu_choice:-1}" in
     1)
       DOWNLOADS_DIR="$EXISTING_DIR"
@@ -685,7 +831,13 @@ if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ] && [ "$FORCE_RECONFIGURE
       fi
       exit 0
       ;;
-    4)
+    4) ACTION=update ;;
+    5)
+      install_cli_shortcut
+      bash /usr/local/bin/dl2curl settings
+      exit $?
+      ;;
+    6)
       echo "Exiting."
       exit 0
       ;;
@@ -693,6 +845,7 @@ if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ] && [ "$FORCE_RECONFIGURE
       echo "Proceeding with setup..."
       ;;
   esac
+fi
 fi
 
 # ─── Drive Discovery Helper ───────────────────────────────────────────────────
@@ -1143,22 +1296,26 @@ setup_health_helper() {
   local helper_temp
   helper_temp=$(mktemp "$INSTALL_DIR/diskspace.py.XXXXXX") || return 1
   SCRIPT_SRC="$(dirname "$0")/diskspace.py"
-  if [ -f "$SCRIPT_SRC" ]; then
+  if [ -f "$SCRIPT_SRC" ] && [ "$(cat "$(dirname "$0")/VERSION" 2>/dev/null)" = "$HELPER_VERSION" ]; then
     if ! cp "$SCRIPT_SRC" "$helper_temp"; then
       rm -f "$helper_temp"
       return 1
     fi
   else
     echo "⬇ Downloading diskspace.py from repository..."
-    if ! curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/diskspace.py" -o "$helper_temp"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "${HELPER_SOURCE_URL}/diskspace.py" -o "$helper_temp"; then
       rm -f "$helper_temp"
       echo "Could not download the health helper. Existing installation was kept." >&2
       return 1
     fi
   fi
-  if ! "$python_bin" -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$helper_temp"; then
+  if ! "$python_bin" -c 'import ast, sys
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+version = next((ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "HELPER_VERSION" for target in node.targets)), None)
+if version != sys.argv[2]:
+    raise SystemExit("Helper version does not match installer")' "$helper_temp" "$HELPER_VERSION"; then
     rm -f "$helper_temp"
-    echo "Downloaded helper is not a valid Python script. Existing installation was kept." >&2
+    echo "Downloaded helper is not a valid Python script for this version. Existing installation was kept." >&2
     return 1
   fi
   chmod +x "$helper_temp"
@@ -1166,7 +1323,7 @@ setup_health_helper() {
 
   # Optional Apache PHP copy
   PHP_SRC="$(dirname "$0")/diskspace.php"
-  if [ -d "/var/www/html" ]; then
+  if [ -d "/var/www/html" ] && { [ "${ACTION:-setup}" != update ] || [ -f "/var/www/html/diskspace.php" ]; }; then
     echo "🌐 Apache / Web server directory detected at /var/www/html"
     if [ -f "$PHP_SRC" ]; then
       cp "$PHP_SRC" "/var/www/html/diskspace.php"
@@ -1176,7 +1333,7 @@ setup_health_helper() {
       echo "⬇ Downloading diskspace.php from repository..."
       local php_temp
       php_temp=$(mktemp "/var/www/html/diskspace.php.XXXXXX") || return 1
-      if curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/diskspace.php" -o "$php_temp"; then
+      if curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "${HELPER_SOURCE_URL}/diskspace.php" -o "$php_temp"; then
         chmod 644 "$php_temp"
         mv "$php_temp" "/var/www/html/diskspace.php"
       else
@@ -1184,6 +1341,10 @@ setup_health_helper() {
         echo "Optional PHP helper download failed; keeping any existing PHP helper." >&2
       fi
     fi
+  fi
+  printf '%s\n' "$HELPER_VERSION" > "$INSTALL_DIR/VERSION" || return 1
+  if [ "${ACTION:-setup}" = update ]; then
+    return 0
   fi
 
   echo "⚙ Configuring systemd auto-boot service ($SERVICE_NAME)..."
@@ -1220,7 +1381,66 @@ EOF
   fi
 }
 
+update_installed_helper() {
+  if [ ! -f "$INSTALL_DIR/diskspace.py" ] || [ ! -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
+    echo "No installed health helper found. Run the installer without 'update' first." >&2
+    return 1
+  fi
+  INTERACTIVE=false
+  CLI_PORT=""
+  HELPER_PORT="$EXISTING_HELPER_PORT"
+  local backup_dir
+  backup_dir=$(mktemp -d "$INSTALL_DIR/.update.XXXXXX") || return 1
+  local targets=("$INSTALL_DIR/diskspace.py" "$INSTALL_DIR/VERSION" "/usr/local/bin/dl2curl")
+  if [ -f "/var/www/html/diskspace.php" ]; then
+    targets+=("/var/www/html/diskspace.php")
+  fi
+  local existed=() index
+  for index in "${!targets[@]}"; do
+    if [ -f "${targets[$index]}" ]; then
+      cp -p "${targets[$index]}" "$backup_dir/asset-$index" || return 1
+      existed[$index]=true
+    else
+      existed[$index]=false
+    fi
+  done
+  echo "Updating helper and CLI to $HELPER_VERSION..."
+  local healthy=false attempt
+  if setup_health_helper && install_cli_shortcut && systemctl restart "$SERVICE_NAME"; then
+    for attempt in 1 2 3 4 5; do
+      if systemctl is-active --quiet "$SERVICE_NAME" && curl -fsSL --connect-timeout 1 --max-time 2 "http://127.0.0.1:${HELPER_PORT}/health" |
+          python3 -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("version") == sys.argv[1] else 1)' "$HELPER_VERSION"; then
+        healthy=true
+        break
+      fi
+      sleep 1
+    done
+  fi
+  if [ "$healthy" = false ]; then
+    echo "Update did not pass its health check. Restoring the previous helper and CLI." >&2
+    for index in "${!targets[@]}"; do
+      if [ "${existed[$index]}" = true ]; then
+        cp -p "$backup_dir/asset-$index" "${targets[$index]}" || return 1
+      else
+        rm -f "${targets[$index]}" || return 1
+      fi
+    done
+    systemctl restart "$SERVICE_NAME" || echo "Check the restored service: systemctl status $SERVICE_NAME" >&2
+  fi
+  rm -f "$backup_dir"/asset-*
+  rmdir "$backup_dir"
+  if [ "$healthy" = false ]; then
+    return 1
+  fi
+  echo "Helper $HELPER_VERSION installed. RPC settings, storage and UPnP preference were preserved."
+}
+
 # ─── Execution ────────────────────────────────────────────────────────────────
+
+if [ "$ACTION" = update ]; then
+  update_installed_helper
+  exit $?
+fi
 
 select_storage
 install_aria2_package

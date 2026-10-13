@@ -1,5 +1,7 @@
 # Raspberry Pi Health & Disk Space Helper for dl2curl → Aria2 RPC
 
+Current helper release: **1.3.0**. Helper releases are versioned separately from the Chrome extension.
+
 Because the standard Aria2 JSON-RPC protocol (`aria2c --enable-rpc`) does not expose host operating system metrics, this optional helper gives your Chrome extension direct real-time visibility into your Raspberry Pi and external drive.
 
 ---
@@ -91,6 +93,10 @@ dl2curl token    # Print only the raw secret token (easy to copy)
 dl2curl tasks    # View active torrents and download speeds
 sudo dl2curl settings  # Keep, generate, or manually change the saved RPC secret
 dl2curl upnp status   # Show UPnP installation and enabled/disabled state
+dl2curl version       # Show CLI and installed helper versions
+dl2curl check-updates # Show the latest helper and extension versions on GitHub
+dl2curl menu          # Interactive version/update/token/UPnP menu
+sudo dl2curl update   # Update just the helper and CLI to the latest tagged release
 ```
 
 The installer uses the fixed RPC secret `dl2curl-aria2` by default and saves it in
@@ -101,6 +107,37 @@ reconfiguring the rest of the server, run `sudo dl2curl settings` and choose
 to keep the current secret, generate a new one, enter a custom secret, or
 disable authentication. The service is restarted after the change, and the
 new secret is shown for entering in the extension's **RPC Secret** setting.
+
+To enter a token manually, run `sudo dl2curl settings`, choose **3 — Enter a new
+secret**, and type it. After the Aria2 service restarts, enter the same token in
+the extension's **RPC Secret**, save settings, and test the connection.
+
+### Versions and Interactive Updates
+
+Running `dl2curl` in an SSH terminal shows the installed helper and CLI versions,
+the latest helper and extension releases on GitHub, and the last extension version
+reported to the Python helper. It then opens an interactive menu. Choose **2** to
+update the helper and CLI, **3** to change the RPC token, or **4** to manage UPnP.
+`dl2curl menu` opens this menu explicitly, while `dl2curl status` prints status only.
+The extension shows the connected helper's version in its health card.
+
+An older installation needs this one-time bootstrap to gain the new menu:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/main/install.sh | sudo bash -s -- update
+```
+
+Helper-only updates preserve the existing service configuration, RPC token,
+download directory, ports and UPnP preference. Only the health service restarts.
+The updater downloads a tagged helper release, verifies the script version,
+backs up the installed files, and restores them if the health check fails.
+
+The public `release.json` contains only the latest helper and extension version
+numbers, so the Pi needs no GitHub login to check the private extension's version.
+The **last connected extension** is the version most recently reported by an app
+request; it is unknown until an updated extension connects, and resets when the
+health service restarts. PHP reports the requesting app's version in its response.
+If GitHub is unreachable, installed versions and local status still work.
 
 ### Optional Automatic Torrent Port Mapping
 
@@ -139,7 +176,13 @@ It detects your existing installation and offers an interactive menu:
 * `[1] View Status & RPC Token (Quick View)`
 * `[2] Reconfigure / Run Full Setup`
 * `[3] View Live Active Downloads`
-* `[4] Exit`
+* `[4] Update helper and CLI only`
+* `[5] Change RPC token`
+* `[6] Exit`
+
+When changing a helper release, update `VERSION`, the installer, Python and PHP
+version constants together. Automated sync publishes a matching helper tag and
+release. Extension releases refresh the public version metadata after publication.
 
 ---
 

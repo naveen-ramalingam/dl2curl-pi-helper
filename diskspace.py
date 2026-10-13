@@ -29,12 +29,23 @@ import shutil
 import time
 import socket
 import tempfile
+import re
+import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 DEFAULT_PORT = 6801
 DEFAULT_PATH = '/mnt/hdd/Downloads'
-HELPER_VERSION = '1.2.0'
+HELPER_VERSION = '1.3.0'
+EXTENSION_INFO = {'version': None, 'last_seen': None}
+EXTENSION_INFO_LOCK = threading.Lock()
+
+
+def extension_info(version=None):
+    with EXTENSION_INFO_LOCK:
+        if isinstance(version, str) and re.fullmatch(r'\d+\.\d+\.\d+', version):
+            EXTENSION_INFO.update(version=version, last_seen=int(time.time()))
+        return dict(EXTENSION_INFO)
 
 
 class HTTPServer(ThreadingHTTPServer):
@@ -203,13 +214,14 @@ class DiskSpaceHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        client = extension_info(qs.get('extension_version', [None])[0]) if parsed.path in ('/health', '/diskspace') else extension_info()
         if parsed.path == '/health':
-            self.send_json({'status': 'ok', 'helper': 'dl2curl-pi-helper', 'version': HELPER_VERSION})
+            self.send_json({'status': 'ok', 'helper': 'dl2curl-pi-helper', 'version': HELPER_VERSION, 'extension': client})
             return
         if parsed.path != '/diskspace':
             self.send_json({'status': 'error', 'error': 'Endpoint not found. Use /diskspace or /health.'}, 404)
             return
-        qs = parse_qs(parsed.query)
 
         requested_path = qs.get('path', [DEFAULT_PATH])[0]
         check_path = requested_path
@@ -247,6 +259,7 @@ class DiskSpaceHandler(BaseHTTPRequestHandler):
                 'status': 'ok',
                 'helper': 'dl2curl-pi-helper',
                 'version': HELPER_VERSION,
+                'extension': client,
                 'timestamp': int(time.time()),
                 'hostname': socket.gethostname(),
                 # Top-level backward compatibility

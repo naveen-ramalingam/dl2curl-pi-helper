@@ -164,10 +164,15 @@ if (file_exists('/proc')) {
 }
 
 // ── Output JSON ────────────────────────────────────────────────────────────
+$extensionVersion = $_GET['extension_version'] ?? null;
+if (!is_string($extensionVersion) || !preg_match('/^\d+\.\d+\.\d+$/', $extensionVersion)) {
+    $extensionVersion = null;
+}
 $response = [
     'status'       => 'ok',
     'helper'       => 'dl2curl-pi-helper',
-    'version'      => '1.2.0',
+    'version'      => '1.3.0',
+    'extension'    => ['version' => $extensionVersion, 'last_seen' => $extensionVersion ? time() : null],
     'timestamp'    => time(),
     'hostname'     => gethostname() ?: 'raspberrypi',
     // Backward-compatible top-level keys
