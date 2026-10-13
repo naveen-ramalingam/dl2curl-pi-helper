@@ -13,7 +13,7 @@
 # ==============================================================================
 
 set -uo pipefail
-HELPER_VERSION="1.3.0"
+HELPER_VERSION="1.3.1"
 HELPER_REPOSITORY_URL="https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper"
 HELPER_SOURCE_URL="${HELPER_REPOSITORY_URL}/v${HELPER_VERSION}"
 HELPER_UPDATES_URL="${HELPER_REPOSITORY_URL}/main/release.json"
@@ -1405,15 +1405,27 @@ update_installed_helper() {
     fi
   done
   echo "Updating helper and CLI to $HELPER_VERSION..."
-  local healthy=false attempt
+  local healthy=false attempt health_response
   if setup_health_helper && install_cli_shortcut && systemctl restart "$SERVICE_NAME"; then
     for attempt in 1 2 3 4 5; do
-      if systemctl is-active --quiet "$SERVICE_NAME" && curl -fsSL --connect-timeout 1 --max-time 2 "http://127.0.0.1:${HELPER_PORT}/health" |
-          python3 -c 'import json, sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("status") == "ok" and data.get("version") == sys.argv[1] else 1)' "$HELPER_VERSION"; then
+      # systemd can report active before Python has bound its HTTP socket.
+      if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null &&
+          health_response=$(curl -fsSL --connect-timeout 1 --max-time 2 "http://127.0.0.1:${HELPER_PORT}/health" 2>/dev/null) &&
+          python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(data, dict) and data.get("status") == "ok" and data.get("version") == sys.argv[1] else 1)' "$HELPER_VERSION" <<< "$health_response"; then
         healthy=true
         break
       fi
-      sleep 1
+      if [ "$attempt" = 1 ]; then
+        echo "Waiting for the helper to become ready..."
+      fi
+      if [ "$attempt" -lt 5 ]; then
+        sleep 1
+      fi
     done
   fi
   if [ "$healthy" = false ]; then
