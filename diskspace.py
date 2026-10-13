@@ -36,7 +36,7 @@ from urllib.parse import urlparse, parse_qs
 
 DEFAULT_PORT = 6801
 DEFAULT_PATH = '/mnt/hdd/Downloads'
-HELPER_VERSION = '1.3.1'
+HELPER_VERSION = '1.3.2'
 EXTENSION_INFO = {'version': None, 'last_seen': None}
 EXTENSION_INFO_LOCK = threading.Lock()
 
