@@ -171,7 +171,7 @@ if (!is_string($extensionVersion) || !preg_match('/^\d+\.\d+\.\d+$/', $extension
 $response = [
     'status'       => 'ok',
     'helper'       => 'dl2curl-pi-helper',
-    'version'      => '1.3.3',
+    'version'      => '1.3.4',
     'extension'    => ['version' => $extensionVersion, 'last_seen' => $extensionVersion ? time() : null],
     'timestamp'    => time(),
     'hostname'     => gethostname() ?: 'raspberrypi',

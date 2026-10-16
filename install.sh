@@ -13,7 +13,7 @@
 # ==============================================================================
 
 set -uo pipefail
-HELPER_VERSION="1.3.3"
+HELPER_VERSION="1.3.4"
 HELPER_REPOSITORY_URL="https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper"
 HELPER_SOURCE_URL="${HELPER_REPOSITORY_URL}/v${HELPER_VERSION}"
 HELPER_UPDATES_URL="${HELPER_REPOSITORY_URL}/main/release.json"
@@ -121,12 +121,15 @@ EXISTING_HELPER_PORT="$DEFAULT_HELPER_PORT"
 
 if [ -f "$EXISTING_CONF" ]; then
   EXISTING_TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$EXISTING_CONF")
-  EXISTING_PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_RPC_PORT")
-  EXISTING_DIR=$(grep -Po '(?<=^dir=).*' "$EXISTING_CONF" 2>/dev/null || echo "$DEFAULT_DOWNLOADS_DIR")
+  EXISTING_PORT=$(awk -F= '$1 == "rpc-listen-port" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$EXISTING_CONF" 2>/dev/null)
+  EXISTING_PORT="${EXISTING_PORT:-$DEFAULT_RPC_PORT}"
+  EXISTING_DIR=$(awk -F= '$1 == "dir" { sub(/^[^=]*=/, ""); print; exit }' "$EXISTING_CONF" 2>/dev/null)
+  EXISTING_DIR="${EXISTING_DIR:-$DEFAULT_DOWNLOADS_DIR}"
 fi
 
 if [ -f "/etc/systemd/system/dl2curl-diskspace.service" ]; then
-  EXISTING_HELPER_PORT=$(grep -Po '(?<=diskspace\.py )\d+' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null || echo "$DEFAULT_HELPER_PORT")
+  EXISTING_HELPER_PORT=$(awk '/diskspace\.py/ { for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null)
+  EXISTING_HELPER_PORT="${EXISTING_HELPER_PORT:-$DEFAULT_HELPER_PORT}"
 fi
 
 
@@ -200,7 +203,9 @@ upnp_enabled() {
 }
 
 upnp_port() {
-  grep -Po '(?<=^listen-port=)\d+' "$EXISTING_CONF" 2>/dev/null || echo 6881
+  local port
+  port=$(awk -F= '$1 == "listen-port" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$EXISTING_CONF" 2>/dev/null)
+  echo "${port:-6881}"
 }
 
 upnp_status() {
@@ -256,7 +261,8 @@ upnp_write_hooks() {
     cat <<'UPNP_OPEN'
 [ -f "$DROPIN" ] || exit 0
 command -v upnpc >/dev/null 2>&1 || exit 1
-PORT=$(grep -Po '(?<=^listen-port=)\d+' "$CONF" 2>/dev/null || echo 6881)
+PORT=$(awk -F= '$1 == "listen-port" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$CONF" 2>/dev/null)
+PORT="${PORT:-6881}"
 TCP_OK=0
 UDP_OK=0
 upnpc -r "$PORT" TCP >/dev/null 2>&1 && TCP_OK=1
@@ -273,7 +279,8 @@ UPNP_OPEN
     printf '#!/usr/bin/env bash\nCONF=%q\n' "$EXISTING_CONF"
     cat <<'UPNP_CLOSE'
 command -v upnpc >/dev/null 2>&1 || exit 0
-PORT=$(grep -Po '(?<=^listen-port=)\d+' "$CONF" 2>/dev/null || echo 6881)
+PORT=$(awk -F= '$1 == "listen-port" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$CONF" 2>/dev/null)
+PORT="${PORT:-6881}"
 upnpc -d "$PORT" TCP >/dev/null 2>&1
 upnpc -d "$PORT" UDP >/dev/null 2>&1
 UPNP_CLOSE
@@ -309,11 +316,7 @@ upnp_set_enabled() {
   if [ "$enabled" = true ]; then
     upnp_write_hooks || return 1
     mkdir -p "$(dirname "$UPNP_DROPIN")" || return 1
-    cat > "$UPNP_DROPIN" <<EOF || return 1
-[Service]
-ExecStartPost=-/bin/bash ${INSTALL_DIR}/upnp-open.sh
-ExecStopPost=-/bin/bash ${INSTALL_DIR}/upnp-close.sh
-EOF
+    printf '[Service]\nExecStartPost=-/bin/bash %s/upnp-open.sh\nExecStopPost=-/bin/bash %s/upnp-close.sh\n' "${INSTALL_DIR}" "${INSTALL_DIR}" > "$UPNP_DROPIN" || return 1
   else
     rm -f "$UPNP_DROPIN" || return 1
   fi
@@ -385,7 +388,8 @@ upnp_manage() {
 # ─── Helper Versions & Updates ───────────────────────────────────────────────
 
 helper_installed_version() {
-  python3 - "$INSTALL_DIR/diskspace.py" <<'VERSION_PY' | tr -d '\r'
+  local ver
+  ver=$(python3 - "$INSTALL_DIR/diskspace.py" <<'VERSION_PY'
 import ast, re, sys
 try:
     tree = ast.parse(open(sys.argv[1], encoding='utf-8').read())
@@ -404,6 +408,8 @@ except (OSError, SyntaxError, ValueError):
     pass
 print('unknown')
 VERSION_PY
+)
+  echo "$ver" | tr -d '\r'
 }
 
 helper_fetch_updates() {
@@ -512,12 +518,15 @@ esac
 
 if [ -f "$CONF" ]; then
   TOKEN=$(awk -F= '$1 == "rpc-secret" { sub(/^[^=]*=/, ""); print; exit }' "$CONF")
-  PORT=$(grep -Po '(?<=^rpc-listen-port=)\d+' "$CONF" 2>/dev/null || echo "6800")
-  DIR=$(grep -Po '(?<=^dir=).*' "$CONF" 2>/dev/null || echo "/mnt/hdd/Downloads")
+  PORT=$(awk -F= '$1 == "rpc-listen-port" && $2 ~ /^[0-9]+$/ { print $2; exit }' "$CONF" 2>/dev/null)
+  PORT="${PORT:-6800}"
+  DIR=$(awk -F= '$1 == "dir" { sub(/^[^=]*=/, ""); print; exit }' "$CONF" 2>/dev/null)
+  DIR="${DIR:-/mnt/hdd/Downloads}"
 fi
 
 if [ -f "/etc/systemd/system/dl2curl-diskspace.service" ]; then
-  HELPER_PORT=$(grep -Po '(?<=diskspace\.py )\d+' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null || echo 6801)
+  HELPER_PORT=$(awk '/diskspace\.py/ { for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' /etc/systemd/system/dl2curl-diskspace.service 2>/dev/null)
+  HELPER_PORT="${HELPER_PORT:-6801}"
 fi
 
 # Manage optional automatic torrent port mapping.
