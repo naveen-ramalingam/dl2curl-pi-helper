@@ -13,10 +13,19 @@
 # ==============================================================================
 
 set -uo pipefail
-HELPER_VERSION="1.3.5"
+HELPER_VERSION="1.3.6"
 HELPER_REPOSITORY_URL="https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper"
 HELPER_SOURCE_URL="${HELPER_REPOSITORY_URL}/v${HELPER_VERSION}"
 HELPER_UPDATES_URL="${HELPER_REPOSITORY_URL}/main/release.json"
+
+clear_terminal() {
+  # Keep redirected output, command substitutions and basic terminals unchanged.
+  if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
+    printf '\033[H\033[2J'
+  fi
+}
+
+clear_terminal
 
 if [ "${1:-}" = version ] || [ "${1:-}" = --version ] || [ "${1:-}" = -V ]; then
   echo "dl2curl Pi installer $HELPER_VERSION"
@@ -484,10 +493,13 @@ install_cli_shortcut() {
     printf '#!/usr/bin/env bash\nDEFAULT_RPC_SECRET=%q\n' "$DEFAULT_RPC_SECRET"
     printf 'INSTALL_DIR=%q\nUPNP_SERVICE=%q\nUPNP_DROPIN=%q\n' "$INSTALL_DIR" "$UPNP_SERVICE" "$UPNP_DROPIN"
     printf 'HELPER_VERSION=%q\nHELPER_REPOSITORY_URL=%q\nHELPER_UPDATES_URL=%q\n' "$HELPER_VERSION" "$HELPER_REPOSITORY_URL" "$HELPER_UPDATES_URL"
+    declare -f clear_terminal
     declare -f upnp_enabled upnp_port upnp_status upnp_package upnp_write_hooks upnp_set_enabled upnp_manage
     declare -f helper_installed_version helper_fetch_updates helper_check_updates helper_pull_latest
     cat << 'CLI_SCRIPT'
 set -u
+
+clear_terminal
 
 C_RESET="\033[0m"
 C_BOLD="\033[1m"
@@ -724,6 +736,7 @@ if [ "${1:-}" = menu ] || { [ -z "${1:-}" ] && [ -t 0 ]; }; then
     echo "  [4] Manage optional UPnP port mapping"
     echo "  [0] Exit"
     read -rp "Choose [0-4, default: 0]: " menu_choice || menu_choice=""
+    clear_terminal
     case "${menu_choice:-0}" in
       1) helper_check_updates || true ;;
       2) helper_pull_latest; exit $? ;;
@@ -731,6 +744,7 @@ if [ "${1:-}" = menu ] || { [ -z "${1:-}" ] && [ -t 0 ]; }; then
       4)
         echo "UPnP actions: status, install, enable, disable, uninstall"
         read -rp "Action [default: status]: " upnp_action || upnp_action=""
+        clear_terminal
         upnp_manage "${upnp_action:-status}" || true
         ;;
       0) exit 0 ;;
@@ -823,6 +837,7 @@ if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ] && [ "$FORCE_RECONFIGURE
   echo -e "  [${C_BOLD}6${C_RESET}] Exit"
   echo ""
   read -rp "Select option [1-6, default: 1]: " menu_choice || menu_choice=""
+  clear_terminal
   case "${menu_choice:-1}" in
     1)
       DOWNLOADS_DIR="$EXISTING_DIR"

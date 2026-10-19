@@ -1,6 +1,6 @@
 # Raspberry Pi Health & Disk Space Helper for dl2curl → Aria2 RPC
 
-Current helper release: **1.3.5**. Helper releases are versioned separately from the Chrome extension.
+Current helper release: **1.3.6**. Helper releases are versioned separately from the Chrome extension.
 
 Because the standard Aria2 JSON-RPC protocol (`aria2c --enable-rpc`) does not expose host operating system metrics, this optional helper gives your Chrome extension direct real-time visibility into your Raspberry Pi and external drive.
 
@@ -48,7 +48,7 @@ curl -sSL https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/
 
 After running the script, in the Chrome extension settings:
 - Set **Aria2 RPC URL** to: `http://<your-pi-ip>:6800/jsonrpc`
-- Set **Aria2 RPC Secret** to: `dl2curl-aria2` (or your saved custom token)
+- The add-on includes the default RPC token automatically. For a saved custom token, use **Custom RPC authentication (optional)**.
 - Set **Download directory** to: `<your-selected-storage-path>`
 - Set **Pi disk space script URL** to: `http://<your-pi-ip>:6801/diskspace` (or `http://<your-pi-ip>/diskspace.php`)
 - Click **Save settings** and **Test connection**.
@@ -56,8 +56,10 @@ After running the script, in the Chrome extension settings:
 For the Python service on its default port, you can leave **Pi disk space script
 URL** blank: the extension automatically tries the configured RPC host on port
 `6801`. Set an explicit URL for a custom helper port, HTTPS, or the PHP alternative.
-The RPC secret still needs to match your saved Aria2 configuration; fresh installs
-use `dl2curl-aria2`.
+Fresh installs use `dl2curl-aria2`, which the add-on supplies automatically. Older
+profiles with a blank or stale token try that default once after an authentication
+rejection, and save it only after a successful response. A custom server token
+still needs to match the value saved under **Custom RPC authentication**.
 
 The helper supports concurrent checks and returns uncached disk metrics. Its
 lightweight `http://<your-pi-ip>:6801/health` endpoint reports service availability
@@ -106,11 +108,12 @@ To change it later without
 reconfiguring the rest of the server, run `sudo dl2curl settings` and choose
 to keep the current secret, generate a new one, enter a custom secret, or
 disable authentication. The service is restarted after the change, and the
-new secret is shown for entering in the extension's **RPC Secret** setting.
+new secret is shown for entering under the extension's **Custom RPC authentication**
+if it differs from the included installer token.
 
 To enter a token manually, run `sudo dl2curl settings`, choose **3 — Enter a new
 secret**, and type it. After the Aria2 service restarts, enter the same token in
-the extension's **RPC Secret**, save settings, and test the connection.
+the extension's **Custom RPC authentication**, save settings, and test the connection.
 
 ### Versions and Interactive Updates
 
@@ -119,6 +122,8 @@ the latest helper and extension releases on GitHub, and the last extension versi
 reported to the Python helper. It then opens an interactive menu. Choose **2** to
 update the helper and CLI, **3** to change the RPC token, or **4** to manage UPnP.
 `dl2curl menu` opens this menu explicitly, while `dl2curl status` prints status only.
+Each command and menu action clears the previous screen in a terminal. Piped or
+redirected output stays unchanged, including `dl2curl token` used in scripts.
 The extension shows the connected helper's version in its health card.
 
 An older installation needs this one-time bootstrap to gain the new menu:
