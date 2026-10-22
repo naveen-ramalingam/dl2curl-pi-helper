@@ -13,7 +13,7 @@
 # ==============================================================================
 
 set -uo pipefail
-HELPER_VERSION="1.3.6"
+HELPER_VERSION="1.3.7"
 HELPER_REPOSITORY_URL="https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper"
 HELPER_SOURCE_URL="${HELPER_REPOSITORY_URL}/v${HELPER_VERSION}"
 HELPER_UPDATES_URL="${HELPER_REPOSITORY_URL}/main/release.json"

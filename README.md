@@ -1,6 +1,6 @@
 # Raspberry Pi Health & Disk Space Helper for dl2curl → Aria2 RPC
 
-Current helper release: **1.3.6**. Helper releases are versioned separately from the Chrome extension.
+Current helper release: **1.3.7**. Helper releases are versioned separately from the Chrome extension.
 
 Because the standard Aria2 JSON-RPC protocol (`aria2c --enable-rpc`) does not expose host operating system metrics, this optional helper gives your Chrome extension direct real-time visibility into your Raspberry Pi and external drive.
 

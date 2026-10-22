@@ -36,7 +36,7 @@ from urllib.parse import urlparse, parse_qs
 
 DEFAULT_PORT = 6801
 DEFAULT_PATH = '/mnt/hdd/Downloads'
-HELPER_VERSION = '1.3.6'
+HELPER_VERSION = '1.3.7'
 EXTENSION_INFO = {'version': None, 'last_seen': None}
 EXTENSION_INFO_LOCK = threading.Lock()
 
@@ -157,32 +157,33 @@ def is_aria2_running():
 
 
 def check_mount_and_writable(path):
-    """Check if path is a mounted filesystem and writable."""
+    """Check if path is a mounted filesystem and writable without spinning up the drive."""
     is_mounted = False
+    mount_is_rw = False
     if os.path.exists('/proc/mounts'):
         try:
             with open('/proc/mounts', 'r', encoding='utf-8') as f:
-                mounts = f.read()
                 norm = os.path.realpath(path)
-                for line in mounts.splitlines():
+                for line in f:
                     parts = line.split()
-                    if len(parts) >= 2:
-                        mount = os.path.normpath(parts[1].replace('\\040', ' ').replace('\\011', '\t').replace('\\134', '\\'))
+                    if len(parts) >= 4:
+                        raw_mount = parts[1].replace('\\040', ' ').replace('\\011', '\t').replace('\\134', '\\')
+                        mount = os.path.normpath(raw_mount)
                         if mount != '/' and (norm == mount or norm.startswith(mount.rstrip('/') + '/')):
                             is_mounted = True
-                            break
+                            opts = parts[3].split(',')
+                            if 'rw' in opts:
+                                mount_is_rw = True
+                            elif 'ro' in opts:
+                                mount_is_rw = False
         except Exception:
             pass
 
-    is_writable = False
-    if os.path.isdir(path) and os.access(path, os.W_OK):
-        try:
-            with tempfile.TemporaryFile(mode='w', encoding='utf-8', dir=path, prefix='.dl2curl_test_') as f:
-                f.write('ok')
-                f.flush()
-            is_writable = True
-        except Exception:
-            is_writable = False
+    # Check mount options & directory permissions without writing a file to disk
+    if is_mounted:
+        is_writable = mount_is_rw and os.path.isdir(path) and os.access(path, os.W_OK)
+    else:
+        is_writable = os.path.isdir(path) and os.access(path, os.W_OK)
 
     return is_mounted, is_writable
 
