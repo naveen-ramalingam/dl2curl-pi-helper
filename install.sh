@@ -70,7 +70,7 @@ fi
 # Defaults
 DEFAULT_HELPER_PORT=6801
 DEFAULT_RPC_PORT=6800
-DEFAULT_RPC_SECRET="dl2curl-aria2"
+DEFAULT_RPC_SECRET="Ayyampalayam!9600"
 DEFAULT_DOWNLOADS_DIR="/mnt/hdd/Downloads"
 INSTALL_DIR="/opt/dl2curl-pi"
 SERVICE_NAME="dl2curl-diskspace"

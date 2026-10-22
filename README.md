@@ -36,7 +36,7 @@ curl -sSL https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper/
    - Detects whether `aria2` (`aria2c`) is installed.
    - If missing, offers 1-click automatic installation via package manager (`apt-get`, `pacman`, `dnf`, `apk`).
    - Configures `/etc/aria2/aria2.conf` with optimized multi-connection settings (16 splits, 16 connections, session persistence).
-   - Sets up authentication with the fixed default token `dl2curl-aria2`, or lets you generate a random token or enter your own custom secret.
+   - Sets up authentication with the fixed default token `Ayyampalayam!9600`, or lets you generate a random token or enter your own custom secret.
    - Creates and enables `/etc/systemd/system/aria2.service` to auto-start on system boot.
    - Asks whether to install and enable optional UPnP torrent port mapping. The default on fresh installs is **No**; declining keeps automatic port mapping disabled.
 3. **dl2curl Health & Disk Space Microservice**:
@@ -56,7 +56,7 @@ After running the script, in the Chrome extension settings:
 For the Python service on its default port, you can leave **Pi disk space script
 URL** blank: the extension automatically tries the configured RPC host on port
 `6801`. Set an explicit URL for a custom helper port, HTTPS, or the PHP alternative.
-Fresh installs use `dl2curl-aria2`, which the add-on supplies automatically. Older
+Fresh installs use `Ayyampalayam!9600`, which the add-on supplies automatically. Older
 profiles with a blank or stale token try that default once after an authentication
 rejection, and save it only after a successful response. A custom server token
 still needs to match the value saved under **Custom RPC authentication**.
@@ -101,7 +101,7 @@ dl2curl menu          # Interactive version/update/token/UPnP menu
 sudo dl2curl update   # Update just the helper and CLI to the latest tagged release
 ```
 
-The installer uses the fixed RPC secret `dl2curl-aria2` by default and saves it in
+The installer uses the fixed RPC secret `Ayyampalayam!9600` by default and saves it in
 `/etc/aria2/aria2.conf`. Re-running the installer preserves the saved secret
 or disabled authentication unless you explicitly choose to change it.
 To change it later without
