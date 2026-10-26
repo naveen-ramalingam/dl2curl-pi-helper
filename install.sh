@@ -13,7 +13,7 @@
 # ==============================================================================
 
 set -uo pipefail
-HELPER_VERSION="1.3.7"
+HELPER_VERSION="1.3.8"
 HELPER_REPOSITORY_URL="https://raw.githubusercontent.com/naveen-ramalingam/dl2curl-pi-helper"
 HELPER_SOURCE_URL="${HELPER_REPOSITORY_URL}/v${HELPER_VERSION}"
 HELPER_UPDATES_URL="${HELPER_REPOSITORY_URL}/main/release.json"
@@ -486,6 +486,64 @@ helper_pull_latest() {
   return "$result"
 }
 
+# ─── State Protection Assets ──────────────────────────────────────────────────
+
+setup_state_protection_assets() {
+  [ "${STATE_ASSETS_READY:-false}" = true ] && return 0
+  mkdir -p "$INSTALL_DIR" || return 1
+  local staging source_dir asset
+  staging=$(mktemp -d "$INSTALL_DIR/.state-assets.XXXXXX") || return 1
+  source_dir=$(dirname "$0")
+  for asset in aria2-state.py install-state-protection.sh; do
+    if [ -f "$source_dir/$asset" ] && [ "$(cat "$source_dir/VERSION" 2>/dev/null)" = "$HELPER_VERSION" ]; then
+      cp "$source_dir/$asset" "$staging/$asset" || break
+    elif ! curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 "${HELPER_SOURCE_URL}/$asset" -o "$staging/$asset"; then
+      break
+    fi
+  done
+  if [ ! -s "$staging/aria2-state.py" ] || [ ! -s "$staging/install-state-protection.sh" ] ||
+     ! python3 - "$staging/aria2-state.py" "$staging/install-state-protection.sh" "$HELPER_VERSION" <<'STATE_VALIDATE'
+import ast, re, sys
+from pathlib import Path
+tree = ast.parse(Path(sys.argv[1]).read_text())
+version = next((ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'STATE_PROTECTION_VERSION' for target in node.targets)), None)
+shell = Path(sys.argv[2]).read_text()
+match = re.search(r'^STATE_PROTECTION_VERSION="([^"]+)"$', shell, re.MULTILINE)
+if version != sys.argv[3] or not match or match.group(1) != sys.argv[3]:
+    raise SystemExit('State protection assets do not match the helper release')
+ast.parse(shell.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0])
+STATE_VALIDATE
+  then
+    rm -f "$staging/aria2-state.py" "$staging/install-state-protection.sh"
+    rmdir "$staging"
+    echo 'Could not validate state protection assets; previous files were kept.' >&2
+    return 1
+  fi
+  if ! bash -n "$staging/install-state-protection.sh"; then
+    rm -f "$staging/aria2-state.py" "$staging/install-state-protection.sh"
+    rmdir "$staging"
+    return 1
+  fi
+  chmod 755 "$staging/aria2-state.py" "$staging/install-state-protection.sh" || return 1
+  mv "$staging/aria2-state.py" "$INSTALL_DIR/aria2-state.py" || return 1
+  mv "$staging/install-state-protection.sh" "$INSTALL_DIR/install-state-protection.sh" || return 1
+  rmdir "$staging"
+  STATE_ASSETS_READY=true
+}
+
+checkpoint_aria2_state() {
+  [ -f "$EXISTING_CONF" ] || return 0
+  local utility="$INSTALL_DIR/aria2-state.py" mode=--offline
+  if [ ! -f "$utility" ]; then
+    echo 'State backup utility is missing. Update the helper before changing aria2 settings.' >&2
+    return 1
+  fi
+  if systemctl is-active --quiet aria2.service 2>/dev/null; then
+    mode=--save-session
+  fi
+  python3 "$utility" --config "$EXISTING_CONF" snapshot "$mode" --wait-lock 15
+}
+
 # ─── Install Global CLI Shortcut ──────────────────────────────────────────────
 
 install_cli_shortcut() {
@@ -496,6 +554,7 @@ install_cli_shortcut() {
     declare -f clear_terminal
     declare -f upnp_enabled upnp_port upnp_status upnp_package upnp_write_hooks upnp_set_enabled upnp_manage
     declare -f helper_installed_version helper_fetch_updates helper_check_updates helper_pull_latest
+    declare -f setup_state_protection_assets checkpoint_aria2_state
     cat << 'CLI_SCRIPT'
 set -u
 
@@ -546,6 +605,32 @@ if [ "${1:-}" = "upnp" ]; then
   upnp_manage "${2:-status}"
   exit $?
 fi
+
+# State protection and private history commands.
+case "${1:-}" in
+  protect|backup|history)
+    if [ "$(id -u)" -ne 0 ]; then
+      echo "Please run as root: sudo dl2curl $1" >&2
+      exit 1
+    fi
+    case "$1" in
+      protect)
+        setup_state_protection_assets || exit 1
+        bash "$INSTALL_DIR/install-state-protection.sh" --activate
+        exit $?
+        ;;
+      backup) checkpoint_aria2_state; exit $? ;;
+      history)
+        if [ ! -f /usr/local/sbin/dl2curl-aria2-state ]; then
+          echo 'Enable persistent task history first: sudo dl2curl protect' >&2
+          exit 1
+        fi
+        /usr/local/sbin/dl2curl-aria2-state history
+        exit $?
+        ;;
+    esac
+    ;;
+esac
 
 # Quick token flag
 if [ "${1:-}" = "token" ] || [ "${1:-}" = "--token" ]; then
@@ -632,6 +717,7 @@ if [ "${1:-}" = "settings" ] || [ "${1:-}" = "--settings" ]; then
     exit 0
   fi
 
+  checkpoint_aria2_state || exit 1
   CONFIG_BACKUP="${CONF}.bak.$(date +%s)"
   if ! cp -p "$CONF" "$CONFIG_BACKUP"; then
     echo "Could not back up $CONF. No changes made." >&2
@@ -805,6 +891,7 @@ if [ "$ACTION" = setup ] && [ "$FORCE_RECONFIGURE" = false ] && [ -f "$EXISTING_
       echo -e " ✓  No configuration changes detected — skipping setup to keep existing settings & RPC secret."
       echo -e "${C_BOLD}${C_GREEN}==============================================================${C_RESET}"
       echo "    (To force re-run setup and change settings, use: install.sh --force)"
+      setup_state_protection_assets || exit 1
       install_cli_shortcut
       DOWNLOADS_DIR="$EXISTING_DIR"
       ARIA2_RPC_PORT="$EXISTING_PORT"
@@ -857,6 +944,7 @@ if [ "$INTERACTIVE" = true ] && [ -f "$EXISTING_CONF" ] && [ "$FORCE_RECONFIGURE
       ;;
     4) ACTION=update ;;
     5)
+      setup_state_protection_assets || exit 1
       install_cli_shortcut
       bash /usr/local/bin/dl2curl settings
       exit $?
@@ -1077,6 +1165,7 @@ install_aria2_package() {
 configure_aria2_rpc() {
   echo ""
   echo "⚙️ Configuring Aria2 RPC..."
+  checkpoint_aria2_state || return 1
 
   # 1. RPC Port
   local rpc_port="${EXISTING_PORT:-$DEFAULT_RPC_PORT}"
@@ -1182,6 +1271,10 @@ configure_aria2_rpc() {
   # 4. Write /etc/aria2/aria2.conf
   mkdir -p /etc/aria2
   local conf_file="/etc/aria2/aria2.conf"
+  local protection_settings=""
+  if [ -f "$conf_file" ] && grep -Fxq 'on-download-stop=/usr/local/sbin/dl2curl-aria2-event' "$conf_file"; then
+    protection_settings=$'rpc-save-upload-metadata=true\nbt-save-metadata=true\nkeep-unfinished-download-result=true\non-download-stop=/usr/local/sbin/dl2curl-aria2-event'
+  fi
   if [ -f "$conf_file" ]; then
     cp "$conf_file" "${conf_file}.bak.$(date +%s)" 2>/dev/null || true
   fi
@@ -1216,6 +1309,7 @@ $([ -n "$ARIA2_SECRET" ] && echo "rpc-secret=${ARIA2_SECRET}")
 input-file=/etc/aria2/aria2.session
 save-session=/etc/aria2/aria2.session
 save-session-interval=60
+${protection_settings}
 
 # ── Performance ───────────────────────────────────────────────────────────────
 disk-cache=64M
@@ -1289,6 +1383,10 @@ EOF
     echo -e "   ${C_YELLOW}⚠️ aria2.service created. Check: journalctl -u aria2 -n 20${C_RESET}"
   fi
 
+  # Refresh the mount dependency if a protected installation changed storage.
+  if [ -n "$protection_settings" ] && [ -f "$INSTALL_DIR/install-state-protection.sh" ]; then
+    bash "$INSTALL_DIR/install-state-protection.sh" --activate || return 1
+  fi
   BT_PORT="$bt_port"
 }
 
@@ -1340,6 +1438,10 @@ if version != sys.argv[2]:
     raise SystemExit("Helper version does not match installer")' "$helper_temp" "$HELPER_VERSION"; then
     rm -f "$helper_temp"
     echo "Downloaded helper is not a valid Python script for this version. Existing installation was kept." >&2
+    return 1
+  fi
+  if ! setup_state_protection_assets; then
+    rm -f "$helper_temp"
     return 1
   fi
   chmod +x "$helper_temp"
@@ -1415,7 +1517,7 @@ update_installed_helper() {
   HELPER_PORT="$EXISTING_HELPER_PORT"
   local backup_dir
   backup_dir=$(mktemp -d "$INSTALL_DIR/.update.XXXXXX") || return 1
-  local targets=("$INSTALL_DIR/diskspace.py" "$INSTALL_DIR/VERSION" "/usr/local/bin/dl2curl")
+  local targets=("$INSTALL_DIR/diskspace.py" "$INSTALL_DIR/VERSION" "/usr/local/bin/dl2curl" "$INSTALL_DIR/aria2-state.py" "$INSTALL_DIR/install-state-protection.sh")
   if [ -f "/var/www/html/diskspace.php" ]; then
     targets+=("/var/www/html/diskspace.php")
   fi
@@ -1478,8 +1580,9 @@ if [ "$ACTION" = update ]; then
   exit $?
 fi
 
+setup_state_protection_assets || exit 1
 select_storage
-install_aria2_package
+install_aria2_package || exit 1
 setup_health_helper || exit 1
 install_cli_shortcut
 show_summary

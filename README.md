@@ -1,6 +1,6 @@
 # Raspberry Pi Health & Disk Space Helper for dl2curl → Aria2 RPC
 
-Current helper release: **1.3.7**. Helper releases are versioned separately from the Chrome extension.
+Current helper release: **1.3.8**. Helper releases are versioned separately from the Chrome extension.
 
 Because the standard Aria2 JSON-RPC protocol (`aria2c --enable-rpc`) does not expose host operating system metrics, this optional helper gives your Chrome extension direct real-time visibility into your Raspberry Pi and external drive.
 
@@ -99,6 +99,9 @@ dl2curl version       # Show CLI and installed helper versions
 dl2curl check-updates # Show the latest helper and extension versions on GitHub
 dl2curl menu          # Interactive version/update/token/UPnP menu
 sudo dl2curl update   # Update just the helper and CLI to the latest tagged release
+sudo dl2curl protect # Enable session backups, archived history, and persistent logs
+sudo dl2curl backup  # Save a private checkpoint immediately
+sudo dl2curl history # Read archived task summaries
 ```
 
 The installer uses the fixed RPC secret `Ayyampalayam!9600` by default and saves it in
@@ -136,6 +139,42 @@ Helper-only updates preserve the existing service configuration, RPC token,
 download directory, ports and UPnP preference. Only the health service restarts.
 The updater downloads a tagged helper release, verifies the script version,
 backs up the installed files, and restores them if the health check fails.
+
+### Session Backups and Archived History (1.3.8)
+
+Setup and helper updates install version-matched `aria2-state.py` and
+`install-state-protection.sh` assets alongside the health helper. To enable the
+recurring protection on a running aria2 installation, run:
+
+```bash
+sudo dl2curl protect
+```
+
+This creates a private checkpoint before changing configuration, enables a
+one-minute backup timer, retains the last nonempty session, saves torrent/control
+metadata, and archives observed task records. Service hooks also checkpoint state
+around aria2 starts and stops. The command restarts aria2 only when needed to load
+the protection settings, after verifying a live checkpoint. It refuses that restart
+if active/queued tasks exist but the saved session is empty. Existing custom
+download-event hooks require integration first.
+
+Backups live under `/var/backups/dl2curl-aria2` with private permissions. Empty
+sessions and live task lists do not erase the recovery checkpoint or archive.
+Keep these files private: they can contain download URLs, cookies, and credentials.
+Run `sudo dl2curl backup` before maintenance and `sudo dl2curl history` to read
+retained summaries. Setup reconfiguration and RPC-token changes also require a
+successful checkpoint before modifying aria2.
+
+Completed history in the native WebUI can disappear after an aria2 restart;
+the separate archive retains records observed after protection was enabled.
+Archived tasks are never automatically requeued. A previous empty session cannot
+reconstruct old history without surviving metadata.
+
+The guard configures a 64 MiB persistent journal. On DietPi RAM logging, it uses
+disk storage at `/var/lib/dl2curl-aria2-journal` and a root-owned link that DietPi's
+hourly cleaner skips. It prepares that path before the boot journal flush and
+preserves existing RAM journals. Off-device backups are still needed for SD-card
+failure protection.
 
 The public `release.json` contains only the latest helper and extension version
 numbers, so the Pi needs no GitHub login to check the private extension's version.
